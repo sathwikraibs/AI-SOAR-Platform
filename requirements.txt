@@ -6,3 +6,4 @@ numpy
 psycopg2-binary
 requests
 python-dotenv
+sqlalchemy
