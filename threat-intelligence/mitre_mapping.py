@@ -14,7 +14,14 @@ Reference: https://attack.mitre.org/techniques/enterprise/
 _RULES = [
     (["ransomware", "encrypt", "mass file rename"], "T1486", "Data Encrypted for Impact"),
     (["phishing", "malicious attachment", "malicious link"], "T1566", "Phishing"),
-    (["brute force", "failed login attempts", "credential stuffing"], "T1110", "Brute Force"),
+    # NOTE: this used to be ["brute force", "failed login attempts", ...],
+    # which never actually matched either brute-force rule's real wording
+    # ("Brute-force login attempt", "failed SSH logins", "failed logins")
+    # -- every brute-force alert in the platform was silently falling
+    # through to UNKNOWN_TECHNIQUE. "brute-force" (hyphen) and "failed
+    # login" (no "attempts") match the phrasing rules.py and
+    # rules_target.py actually generate.
+    (["brute force", "brute-force", "failed login", "credential stuffing"], "T1110", "Brute Force"),
     (["successful login", "unusual login", "impossible travel"], "T1078", "Valid Accounts"),
     (["port scan", "network scan", "reconnaissance"], "T1595", "Active Scanning"),
     (["lateral movement", "psexec", "remote service"], "T1021", "Remote Services"),
@@ -26,7 +33,7 @@ _RULES = [
     (["dns tunnel", "unusual dns"], "T1071.004", "Application Layer Protocol: DNS"),
     (["malware", "trojan", "backdoor"], "T1204", "User Execution"),
     (["dos", "denial of service", "flood"], "T1498", "Network Denial of Service"),
-    (["sql injection", "xss", "web attack"], "T1190", "Exploit Public-Facing Application"),
+    (["sql injection", "xss", "web attack", "path traversal", "directory traversal"], "T1190", "Exploit Public-Facing Application"),
 ]
 
 UNKNOWN_TECHNIQUE = ("T1000-UNK", "Unmapped / Needs Manual Triage")

@@ -26,6 +26,7 @@ _EXFIL_TECHNIQUES = {"T1041", "T1071", "T1071.004"}
 _CREDENTIAL_TECHNIQUES = {"T1110", "T1078"}
 _RECON_TECHNIQUES = {"T1595"}
 _MALWARE_TECHNIQUES = {"T1486", "T1204"}
+_WEB_ATTACK_TECHNIQUES = {"T1190"}
 
 # Weight given to the AI classifier's severity label when computing the
 # composite risk score below (0-100 scale, same as threat_score).
@@ -82,6 +83,8 @@ def decide_response(severity: str, enrichment: dict):
         playbook_key = "credential_attack"
     elif technique_id in _RECON_TECHNIQUES:
         playbook_key = "network_recon"
+    elif technique_id in _WEB_ATTACK_TECHNIQUES:
+        playbook_key = "web_attack_response"
     elif severity in ("High", "Medium"):
         playbook_key = "standard_triage"
     else:

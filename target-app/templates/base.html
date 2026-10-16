@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}GridWatch{% endblock %}</title>
+  <style>
+    :root{
+      --bg:#0a1414; --panel:#111f1e; --panel-2:#0d1918; --border:#20403a;
+      --text:#e6f2ee; --muted:#7fa89c; --accent:#14b8a6; --accent-dark:#0d9488;
+      --danger:#f87171; --success:#4ade80; --warning:#f59e0b;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; min-height:100vh; background:
+        radial-gradient(circle at 15% 0%, #10251f 0%, transparent 45%),
+        radial-gradient(circle at 100% 100%, #0c1e22 0%, transparent 50%),
+        var(--bg);
+      color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    a{color:inherit}
+    .topbar{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:0 28px; height:60px; border-bottom:1px solid var(--border);
+      background:rgba(13,25,24,.8); backdrop-filter:blur(6px);
+      position:sticky; top:0; z-index:5;
+    }
+    .brand{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:.01em; font-size:15px}
+    .brand .mark{
+      width:26px; height:26px; border-radius:7px; display:grid; place-items:center;
+      background:linear-gradient(135deg,var(--accent),#0891b2); color:#04201c; font-size:13px; font-weight:800;
+    }
+    .brand small{display:block; color:var(--muted); font-weight:500; font-size:10px; letter-spacing:.08em; margin-top:1px}
+    .topnav{display:flex; align-items:center; gap:4px}
+    .topnav a{
+      padding:8px 13px; border-radius:6px; font-size:13px; font-weight:500; color:var(--muted);
+      text-decoration:none; transition:background-color .15s ease,color .15s ease;
+    }
+    .topnav a:hover{background:#173330; color:var(--text)}
+    .topnav a.current{background:#163e38; color:var(--text)}
+    .topnav .divider{width:1px; height:20px; background:var(--border); margin:0 8px}
+    .user-chip{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted)}
+    .user-chip .avatar{
+      width:24px; height:24px; border-radius:50%; background:#173330; border:1px solid var(--border);
+      display:grid; place-items:center; font-size:11px; font-weight:700; color:var(--text); text-transform:uppercase;
+    }
+    .logout-link{color:var(--muted); font-size:12.5px; text-decoration:none; padding:6px 10px; border-radius:6px}
+    .logout-link:hover{background:#241823; color:var(--danger)}
+    .page{display:flex; justify-content:center; padding:56px 20px 40px}
+    .page.center{min-height:calc(100vh - 60px); align-items:center; padding-top:20px}
+    .card{
+      background:var(--panel); border:1px solid var(--border); border-radius:14px;
+      padding:30px 32px; width:100%; box-shadow:0 20px 50px -20px rgba(0,0,0,.55);
+    }
+    .card.narrow{max-width:360px}
+    .card.medium{max-width:440px}
+    .card.wide{max-width:600px}
+    .eyebrow{font-size:10.5px; letter-spacing:.12em; color:var(--accent); font-weight:700; text-transform:uppercase; margin:0 0 8px}
+    h1{font-size:19px; margin:0 0 6px; font-weight:650; letter-spacing:-.01em}
+    .subtitle{color:var(--muted); font-size:13px; margin:0 0 22px; line-height:1.5}
+    label{display:block; font-size:11.5px; color:var(--muted); font-weight:600; margin:0 0 6px; letter-spacing:.02em}
+    .field{margin-bottom:16px}
+    input[type=text], input[type=password]{
+      width:100%; padding:11px 13px; border-radius:8px; border:1px solid var(--border);
+      background:var(--panel-2); color:var(--text); font-size:13.5px; outline:0;
+      transition:border-color .15s ease, box-shadow .15s ease;
+    }
+    input[type=text]:focus, input[type=password]:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(20,184,166,.2)}
+    input[type=file]{
+      width:100%; padding:14px; border-radius:8px; border:1.5px dashed var(--border);
+      background:var(--panel-2); color:var(--muted); font-size:12.5px;
+    }
+    button, .btn{
+      display:inline-flex; align-items:center; justify-content:center; gap:8px;
+      width:100%; padding:11px 14px; border-radius:8px; border:none; cursor:pointer;
+      background:linear-gradient(180deg,var(--accent),var(--accent-dark)); color:#fff;
+      font-weight:650; font-size:13.5px; letter-spacing:.01em; text-decoration:none;
+      transition:filter .15s ease, transform .1s ease;
+    }
+    button:hover, .btn:hover{filter:brightness(1.08)}
+    button:active, .btn:active{transform:scale(.985)}
+    .btn.secondary{background:var(--panel-2); border:1px solid var(--border); color:var(--text)}
+    .btn.block-group .btn{margin-bottom:9px}
+    .actions{display:flex; flex-direction:column; gap:9px; margin-top:4px}
+    .banner{border-radius:8px; padding:10px 13px; font-size:12.5px; margin-bottom:16px; line-height:1.5}
+    .banner.error{background:#2a1518; border:1px solid #55232a; color:var(--danger)}
+    .banner.success{background:#12281c; border:1px solid #245335; color:var(--success); word-break:break-all}
+    .hint{color:#5c6a82; font-size:11.5px; margin-top:18px; line-height:1.5; display:flex; gap:7px; align-items:flex-start}
+    .hint .dot{width:5px; height:5px; border-radius:50%; background:#5c6a82; margin-top:5px; flex:none}
+    .back-link{display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12.5px; text-decoration:none; margin-top:18px}
+    .back-link:hover{color:var(--text)}
+    table{width:100%; border-collapse:collapse; margin-top:6px; font-size:13px}
+    th, td{text-align:left; padding:10px 8px; border-bottom:1px solid var(--border)}
+    th{color:var(--muted); font-weight:650; text-transform:uppercase; font-size:10px; letter-spacing:.07em}
+    td{color:#dcefe9}
+    .plan-tag{display:inline-block; padding:2px 8px; border-radius:20px; font-size:10.5px; font-weight:650; letter-spacing:.02em}
+    .plan-normal{background:#12301f; color:#6ee7a8}
+    .plan-high-load{background:#33230f; color:#fbbf67}
+    .plan-critical{background:#331414; color:#fca5a5}
+    ul.file-list{list-style:none; margin:6px 0 0; padding:0}
+    ul.file-list li{
+      display:flex; align-items:center; gap:10px; padding:11px 4px; border-bottom:1px solid var(--border); font-size:13px;
+    }
+    ul.file-list li:last-child{border-bottom:0}
+    ul.file-list .file-icon{
+      width:28px; height:28px; border-radius:7px; background:var(--panel-2); border:1px solid var(--border);
+      display:grid; place-items:center; font-size:12px; flex:none; color:var(--muted);
+    }
+    ul.file-list a{color:#7dd8cc; text-decoration:none; word-break:break-all; font-size:12.5px}
+    ul.file-list a:hover{text-decoration:underline}
+    .empty-state{color:#5c6a82; font-size:13px; margin-top:8px; text-align:center; padding:24px 0}
+    .card-foot{display:flex; gap:10px; margin-top:22px}
+    .card-foot .btn{width:auto; padding:9px 15px; font-size:12.5px}
+    .dash-grid{display:grid; gap:10px; margin-top:22px}
+    .dash-tile{
+      display:flex; align-items:center; gap:13px; padding:15px 16px; border-radius:10px;
+      border:1px solid var(--border); background:var(--panel-2); text-decoration:none; color:var(--text);
+      transition:border-color .15s ease, background-color .15s ease;
+    }
+    .dash-tile:hover{border-color:#2c6156; background:#123128}
+    .dash-tile .icon{
+      width:34px; height:34px; border-radius:8px; display:grid; place-items:center; flex:none; font-size:15px;
+      background:linear-gradient(135deg,rgba(20,184,166,.2),rgba(8,145,178,.2)); color:#7dd8cc;
+    }
+    .dash-tile strong{display:block; font-size:13.5px; font-weight:650}
+    .dash-tile span{display:block; color:var(--muted); font-size:11.5px; margin-top:2px}
+  </style>
+</head>
+<body>
+  {% if show_nav %}
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">G</span>
+      <span>GridWatch<small>SCADA OPERATIONS CONSOLE</small></span>
+    </div>
+    <nav class="topnav">
+      <a href="/" class="{{ 'current' if active=='dashboard' else '' }}">Dashboard</a>
+      <a href="/records" class="{{ 'current' if active=='records' else '' }}">Substation Records</a>
+      <a href="/files" class="{{ 'current' if active=='files' else '' }}">Config &amp; Firmware</a>
+      <span class="divider"></span>
+      <div class="user-chip"><span class="avatar">{{ username[0] if username else '?' }}</span>{{ username }}</div>
+      <a class="logout-link" href="/logout">Log out</a>
+    </nav>
+  </header>
+  {% endif %}
+  <div class="page {{ 'center' if not show_nav else '' }}">
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

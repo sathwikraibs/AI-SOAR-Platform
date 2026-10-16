@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% set show_nav = true %}
+{% set active = 'files' %}
+{% block title %}Config &amp; Firmware — GridWatch{% endblock %}
+{% block content %}
+<div class="card medium">
+  <div class="eyebrow">Shared Drive</div>
+  <h1>Config &amp; Firmware Storage</h1>
+  <p class="subtitle">Substation configuration and firmware files shared across the operations team.</p>
+  {% if filenames %}
+  <ul class="file-list">
+    {% for name in filenames %}
+    <li><span class="file-icon">▤</span><a href="/files/{{ name }}">{{ name }}</a></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty-state">No files uploaded yet.</div>
+  {% endif %}
+  <div class="card-foot">
+    <a class="btn" style="width:auto" href="/upload">Upload a file</a>
+    <a class="back-link" href="/" style="align-self:center; margin-top:0">← Back to dashboard</a>
+  </div>
+</div>
+{% endblock %}

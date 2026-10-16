@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% set show_nav = true %}
+{% set active = 'files' %}
+{% block title %}Upload — GridWatch{% endblock %}
+{% block content %}
+<div class="card medium">
+  <div class="eyebrow">Shared Drive</div>
+  <h1>Upload Config / Firmware</h1>
+  <p class="subtitle">Push a new configuration or firmware file to the operations team's shared storage.</p>
+  <form method="post" enctype="multipart/form-data">
+    <div class="field">
+      <input type="file" name="file">
+    </div>
+    <button type="submit">Upload</button>
+  </form>
+  {% if message %}<div class="banner success" style="margin-top:16px">{{ message }}</div>{% endif %}
+  <a class="back-link" href="/">← Back to dashboard</a>
+</div>
+{% endblock %}

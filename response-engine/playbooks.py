@@ -59,6 +59,14 @@ PLAYBOOKS = {
             {"action": "Page on-call SOC analyst (P1)", "auto": True},
         ],
     },
+    "web_attack_response": {
+        "name": "Web Application Attack Response",
+        "steps": [
+            {"action": "Block source IP at the WAF/firewall", "auto": False},
+            {"action": "Add source IP to watchlist", "auto": True},
+            {"action": "Notify SOC analyst", "auto": True},
+        ],
+    },
     "standard_triage": {
         "name": "Standard Analyst Triage",
         "steps": [

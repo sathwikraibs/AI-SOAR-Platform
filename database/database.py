@@ -34,6 +34,7 @@ def migrate_schema():
         "response_action": "VARCHAR",
         "response_playbook": "VARCHAR",
         "response_status": "VARCHAR",
+        "rule_key": "VARCHAR",
     }
 
     with engine.begin() as conn:

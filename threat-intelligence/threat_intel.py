@@ -32,6 +32,16 @@ try:
 except ImportError:  # pragma: no cover - import path differs when run standalone vs. via sys.path append
     from .mitre_mapping import map_to_mitre  # type: ignore
 
+try:
+    # Only importable when the repo root is on sys.path, which it is when
+    # this module is loaded by backend/main.py (same process). Running this
+    # file standalone (`python3 threat_intel.py`) doesn't have that on
+    # sys.path, so fall back to a no-op rather than crashing on import.
+    from integration_health import record_failure
+except ImportError:  # pragma: no cover
+    def record_failure(*_args, **_kwargs):  # type: ignore
+        pass
+
 import requests
 
 ABUSEIPDB_API_KEY = os.getenv("ABUSEIPDB_API_KEY")
@@ -129,6 +139,7 @@ def check_ip_reputation(ip: str | None):
             return result
         except Exception as exc:  # noqa: BLE001 - any failure falls back, never breaks ingestion
             print(f"[threat-intel] WARNING: AbuseIPDB lookup failed for {ip} ({exc}); using heuristic fallback.")
+            record_failure("AbuseIPDB", str(exc), context=f"IP lookup: {ip}")
 
     score = _mock_ip_score(ip)
     result = (_score_to_reputation(score), score)
@@ -175,6 +186,7 @@ def check_hash_reputation(file_hash: str | None):
             return result
         except Exception as exc:  # noqa: BLE001
             print(f"[threat-intel] WARNING: VirusTotal lookup failed for {file_hash} ({exc}); using heuristic fallback.")
+            record_failure("VirusTotal", str(exc), context=f"Hash lookup: {file_hash}")
 
     score = _mock_hash_score(file_hash)
     result = (_score_to_reputation(score), score)

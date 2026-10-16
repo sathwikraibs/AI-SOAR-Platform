@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Sign in — GridWatch{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <div class="eyebrow">SCADA Restricted Access</div>
+  <h1>GridWatch Operations Console</h1>
+  <p class="subtitle">Regional power-grid control system. Authorized grid operators only.</p>
+  {% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+  <form method="post">
+    <div class="field">
+      <label for="username">Operator ID</label>
+      <input type="text" id="username" name="username" placeholder="e.g. admin" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" placeholder="••••••••">
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+{% endblock %}

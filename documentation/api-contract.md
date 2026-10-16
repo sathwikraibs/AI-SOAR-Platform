@@ -156,6 +156,77 @@ Pipeline order on every `POST /alerts`: **AI severity classifier -> threat-intel
 - API keys are optional. Set `ABUSEIPDB_API_KEY` / `VIRUSTOTAL_API_KEY` in a `.env` file at the repo root (gitignored) to hit the real APIs; otherwise enrichment uses a deterministic heuristic so the pipeline still works end-to-end without any keys configured.
 - `database/database.py:migrate_schema()` auto-adds these columns to an existing `database/soar.db` on startup, so pulling this change won't break a teammate's existing local DB.
 
+## 5. GET /reports
+Lists auto-generated incident report PDFs, newest first.
+
+### Example Response (200 OK)
+```json
+[
+  { "filename": "report_20260922_101020.pdf", "generated_at": "20260922_101020", "download_url": "/reports/report_20260922_101020.pdf" }
+]
+```
+
+## 6. GET /reports/{filename}
+Downloads one report PDF (`filename` must be one returned by `GET /reports`). `400` on an invalid filename, `404` if it doesn't exist.
+
+## 7. GET /alerts/{alert_id}
+Full detail for one alert, including a per-step `execution_log` derived from `response_playbook` + `response_status` — shows exactly which playbook steps executed, are pending, or were rejected, instead of just the summary `response_status` string. `404` if the alert doesn't exist.
+
+### Example Response (200 OK)
+```json
+{
+  "id": 12,
+  "severity": "High",
+  "risk_score": 71,
+  "mitre_technique": "T1110 - Brute Force",
+  "response_action": "Credential / Brute-Force Response",
+  "response_status": "pending_approval",
+  "execution_log": [
+    { "action": "Lock affected user account", "auto": false, "status": "pending" },
+    { "action": "Block source IP at the firewall", "auto": false, "status": "pending" },
+    { "action": "Force password reset on next login", "auto": false, "status": "pending" },
+    { "action": "Notify SOC analyst", "auto": true, "status": "executed" }
+  ]
+}
+```
+
+## 8. GET /incidents
+Groups this session's alerts by source IP into "incidents": alerts from the same IP within 120s of each other (the same window `detection-agent`'s own correlation finding uses) are merged into one incident instead of shown as N separate alerts. Useful for a dashboard that wants to show "3 alerts → 1 incident" rather than a flat list.
+
+### Example Response (200 OK)
+```json
+[
+  {
+    "incident_id": 1,
+    "ip": "103.162.210.84",
+    "alert_count": 3,
+    "alert_ids": [12, 13, 14],
+    "max_severity": "High",
+    "mitre_techniques": ["T1110 - Brute Force", "T1204 - User Execution"],
+    "any_pending_approval": true,
+    "first_seen": "2026-09-22T11:29:10Z",
+    "last_seen": "2026-09-22T11:29:48Z"
+  }
+]
+```
+
+## 9. GET /alerts/export.csv
+Streams every alert as a CSV file (`Content-Disposition: attachment`) — for pulling the session's alerts into a spreadsheet.
+
+## Live Detection & Autonomous Reporting
+Three new standalone components sit on top of the existing pipeline without changing it:
+
+- **`target-app/`** — a minimal Flask app (login form + file upload) whose only job is to log every login attempt and uploaded file (with sha256) to `target-app/logs/access.log`, so there's something real for the SOAR to watch.
+- **`detection-agent/`** — polls the machine (processes, network connections, OS auth log, and `target-app/logs/access.log`) every 3s and automatically calls `POST /alerts` when it sees brute-force logins, a suspicious process spawn, a connection to a known-bad IP, a file upload (submitted with its hash — the existing `threat_intel.py` enrichment step checks it against VirusTotal, no new code needed there), or a cross-signal correlation (same source IP triggering 2+ distinct finding types = escalated as a "multi-stage attack" finding).
+- **`report-generator/`** — polls `GET /alerts` every 20s and, whenever there are new alerts, writes a PDF summary (severity/risk breakdown, MITRE techniques, threat-intel verdicts, response actions) into `reports/` at the repo root, downloadable via the endpoints above.
+
+None of these three change `backend/main.py`'s alert-processing logic (aside from the two new `/reports` routes) — they're new *callers* of the pipeline that already existed, and a new *reader* of the alerts it already produces.
+
 ## Changelog
 - **Day 2 (Tejas):** `severity` changed from required to optional/ignored in the `POST /alerts` request body. It is now always assigned server-side by the AI classifier. Downstream stages (threat intel, frontend) should treat the `severity` returned by `GET`/`POST /alerts` as the source of truth.
 - **Day 3 (Nanda):** Added `ip_reputation`, `hash_reputation`, `threat_score`, `mitre_technique`, `risk_score`, `response_action`, `response_playbook`, `response_status` to the alert response (all server-assigned — see section above), plus `POST /alerts/{id}/approve` and `POST /alerts/{id}/reject` for the human-in-the-loop approval workflow. Frontend/Docker stage (Sathwik): the dashboard should (a) sort/highlight by `risk_score`, (b) show an "Approve"/"Reject" action on alerts with `response_status == "pending_approval"` calling the new endpoints, and (c) render `response_playbook`'s `auto` steps vs. pending ones differently (e.g. checkmark vs. a button). Nothing about the existing request fields or Day 2 fields changed.
+- **Live detection + autonomous reporting (Sathwik):** Added `target-app/` (demo login+upload server), `detection-agent/` (real-time watcher that auto-submits alerts to `POST /alerts` from real activity — process spawns, brute-force, bad-IP connections, target-app logins/uploads, cross-signal correlation), `report-generator/` (writes a PDF incident summary to `reports/` every ~20s), and `GET /reports` / `GET /reports/{filename}` on the backend to list/download them. Frontend should add a Live Logs tab (poll `GET /alerts`) and a Reports tab (poll `GET /reports`, link each `download_url`).
+- **Target-app hardening + broader attack surface (Sathwik):** `target-app/` now has two demo accounts (`admin`, `manager`, so credential stuffing across accounts is distinct from single-account brute force), a `/records` page and `/files` listing behind login (something for an "attacker" to actually go after), an app-layer lockout after 5 failed logins in 5 minutes (`ACCOUNT_LOCKED` / `LOGIN_BLOCKED` log events), suspicious-extension flagging on upload (`SUSPICIOUS_FILE_UPLOADED`), and a path-traversal guard on `/files/<name>` that detects and blocks (403) any request resolving outside `uploads/` (`PATH_TRAVERSAL_ATTEMPT`). `detection-agent/rules_target.py` now turns all of these into findings, plus a distinct credential-stuffing detector (2+ different usernames failing from one IP, separate from same-username brute force).
+- **MITRE mapping bug fix (Sathwik):** `threat-intelligence/mitre_mapping.py`'s brute-force keywords (`"brute force"`, `"failed login attempts"`) never actually matched either brute-force rule's real wording (`"Brute-force login attempt"`, `"failed SSH logins"`) — every brute-force alert in the platform, since Day 3, was silently falling through to `T1000-UNK — Unmapped`. Fixed by broadening the keyword list to match the phrasing the rules actually generate. Also added a `web_attack_response` playbook (block source IP pending approval, watchlist + notify auto) routed from `T1190 - Exploit Public-Facing Application` (path traversal, SQLi, XSS), previously falling through to generic `standard_triage`.
+- **Optional Critical-alert Slack notification (Sathwik):** If `SOAR_SLACK_WEBHOOK_URL` is set, every Critical-severity alert is also posted to that Slack incoming webhook. No-op if unset; a failed post never affects alert ingestion.
+- **CORS (Sathwik):** `backend/main.py` now allows all origins so `frontend-dashboard/` (a separate Vite dev server) can call this API from the browser.

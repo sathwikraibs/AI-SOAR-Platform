@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% set show_nav = true %}
+{% set active = 'dashboard' %}
+{% block title %}Dashboard — GridWatch{% endblock %}
+{% block content %}
+<div class="card medium" style="max-width:520px">
+  <div class="eyebrow">Grid Overview</div>
+  <h1>Welcome back, {{ username }}</h1>
+  <p class="subtitle">You're signed in to GridWatch's regional substation operations console.</p>
+  <div class="dash-grid">
+    <a class="dash-tile" href="/records">
+      <span class="icon">◧</span>
+      <span><strong>Substation records</strong><span>Load status &amp; inspection roster across all regions</span></span>
+    </a>
+    <a class="dash-tile" href="/files">
+      <span class="icon">▤</span>
+      <span><strong>Config &amp; firmware storage</strong><span>Files shared across the operations team</span></span>
+    </a>
+    <a class="dash-tile" href="/upload">
+      <span class="icon">↥</span>
+      <span><strong>Upload config / firmware</strong><span>Push a new file to shared storage</span></span>
+    </a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set show_nav = true %}
+{% set active = 'records' %}
+{% block title %}Substation Records — GridWatch{% endblock %}
+{% block content %}
+<div class="card wide">
+  <div class="eyebrow">Grid Directory</div>
+  <h1>Substation Records</h1>
+  <p class="subtitle">Regional substation roster &amp; load status — visible to signed-in operators only.</p>
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Substation</th><th>Region</th><th>Load Status</th><th>Last Inspection</th></tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td>#{{ r.id }}</td>
+        <td>{{ r.name }}</td>
+        <td>{{ r.region }}</td>
+        <td><span class="plan-tag plan-{{ r.load_status|lower|replace(' ', '-') }}">{{ r.load_status }}</span></td>
+        <td>{{ r.last_inspection }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="card-foot">
+    <a class="btn secondary" href="/files">Config &amp; firmware</a>
+    <a class="back-link" href="/" style="align-self:center; margin-top:0">← Back to dashboard</a>
+  </div>
+</div>
+{% endblock %}
