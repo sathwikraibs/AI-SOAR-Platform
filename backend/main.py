@@ -36,6 +36,7 @@ from classifier import predict_severity  # noqa: E402
 from threat_intel import check_hash_reputation, check_ip_reputation, enrich_alert  # noqa: E402
 from geo_lookup import geolocate_ip  # noqa: E402
 from response_engine import (  # noqa: E402
+    add_immediate_ip_block,
     approve_pending_steps,
     compute_risk_score,
     decide_response,
@@ -43,6 +44,7 @@ from response_engine import (  # noqa: E402
     response_steps_json,
 )
 from playbooks import PLAYBOOKS  # noqa: E402
+import ip_blocklist  # noqa: E402
 
 from .ssh_manager import run_diagnostics  # noqa: E402
 
@@ -210,6 +212,21 @@ def create_alert(alert: AlertCreate):
         ip=alert_data.get("ip"),
         hash=alert_data.get("hash"),
     )
+
+    # Anonymizer blocklist: is the source IP a known VPN / Tor exit / open
+    # proxy? That's a fact from the list, not a guess, and it means the
+    # sender is deliberately hiding who they are -- so reputation is forced
+    # to Malicious and the threat score to at least 90. (Severity still
+    # comes only from the AI classifier, and the MITRE technique from the
+    # alert text -- neither is touched here.)
+    anon_match = ip_blocklist.lookup(alert_data.get("ip"))
+    if anon_match:
+        enrichment = {
+            **enrichment,
+            "ip_reputation": "Malicious",
+            "threat_score": max(enrichment.get("threat_score", 0), 90),
+        }
+
     alert_data["ip_reputation"] = enrichment["ip_reputation"]
     alert_data["hash_reputation"] = enrichment["hash_reputation"]
     alert_data["threat_score"] = enrichment["threat_score"]
@@ -225,6 +242,9 @@ def create_alert(alert: AlertCreate):
     # are held as "pending_approval" until an analyst calls
     # POST /alerts/{id}/approve -- see response-engine/playbooks.py.
     playbook_key, playbook = decide_response(alert_data["severity"], enrichment)
+    if anon_match:
+        # Block right away instead of queueing the block for approval.
+        playbook = add_immediate_ip_block(playbook, anon_match)
     response_status, executed_steps, pending_steps = execute_response(
         playbook_key, playbook, {"ip": alert_data.get("ip"), "hash": alert_data.get("hash")}
     )
@@ -238,6 +258,14 @@ def create_alert(alert: AlertCreate):
     db.refresh(new_alert)
     notify_if_critical(new_alert)
     log_audit(db, actor="system", action="Alert ingested", target=f"ALT-{new_alert.id}", source_ip=new_alert.ip)
+    if anon_match:
+        log_audit(
+            db,
+            actor="system",
+            action=f"Blocked IP immediately (anonymizer blocklist: {anon_match['category'].upper()} - {anon_match['label']})",
+            target=f"ALT-{new_alert.id}",
+            source_ip=anon_match["ip"],
+        )
     result = alert_to_dict(new_alert)
     db.close()
     return result
@@ -1136,7 +1164,38 @@ RULE_DEFINITIONS = [
         "description": "The same source IP triggers 2+ distinct rules above within a short window -- escalated as a single higher-priority multi-stage attack.",
         "source": "SOAR-Correlation",
     },
+    {
+        "key": "ransomware_activity",
+        "name": "Ransomware / Mass File Encryption",
+        "description": "Files in the target app's SCADA file store being encrypted: new .locked/.encrypted-style extensions, files rewritten from readable data into random-looking bytes (entropy jump), or a ransom note appearing. Raised as a Critical ransomware alert (MITRE T1486).",
+        "source": "Endpoint",
+    },
+    {
+        "key": "anonymizer_ip_block",
+        "name": "VPN / Tor / Proxy IP Block",
+        "description": "A request from an IP on the pre-loaded anonymizer blocklist (VPN, Tor exit node or open proxy) was refused on arrival. Switching this rule off only silences the alert; the target app keeps blocking.",
+        "source": "Target-App",
+    },
 ]
+
+
+@app.get("/blocklist")
+def get_blocklist():
+    """
+    Summary of the VPN / Tor / proxy blocklist (threat-intelligence/
+    anonymizer_blocklist.txt plus the optional downloaded feeds file), and
+    how many connections it has blocked so far.
+    """
+    db = SessionLocal()
+    blocked = db.query(func.count(models.Alert.id)).filter(models.Alert.rule_key == "anonymizer_ip_block").scalar() or 0
+    db.close()
+    return {**ip_blocklist.stats(), "blocks_alerted": blocked}
+
+
+@app.get("/blocklist/check")
+def check_blocklist(ip: str):
+    """Is this IP on the anonymizer blocklist? Returns the matching entry, or null."""
+    return {"ip": ip, "match": ip_blocklist.lookup(ip)}
 
 
 @app.get("/detection-rules")

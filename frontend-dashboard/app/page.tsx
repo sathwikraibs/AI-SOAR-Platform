@@ -214,7 +214,7 @@ function formatReportTimestamp(raw: string): string {
 
 function ApiNotice({ show }: { show:boolean }) { return show ? <p className="muted" style={{margin:'0 0 16px'}}>Can't reach the backend at {API_BASE} right now — showing example data.</p> : null }
 const nav = [
-  ['COMMAND','Overview',LayoutDashboard],['MONITOR','Alerts',AlertTriangle],['MONITOR','Incidents',ShieldAlert],['MONITOR','Investigations',Crosshair],['AUTOMATE','Playbooks',Play],['AUTOMATE','Runbook',BookOpen],['INTELLIGENCE','Threat Intelligence',Database],['INTELLIGENCE','Global Threat Map',Globe2],['OPERATIONS','Assets',Server],['OPERATIONS','Response Center',Zap],['OPERATIONS','SSH / Sessions',Terminal],['SYSTEM','Audit',FileClock],['SYSTEM','Reports',FileText],['SYSTEM','24-Hour Report',Clock3],['SYSTEM','Detection Rules',SlidersHorizontal],['SYSTEM','Integrations',Network],['SYSTEM','Admin Panel',LockKeyhole],['SYSTEM','Settings',Settings],
+  ['COMMAND','Overview',LayoutDashboard],['MONITOR','Alerts',AlertTriangle],['MONITOR','Incidents',ShieldAlert],['MONITOR','Investigations',Crosshair],['AUTOMATE','Playbooks',Play],['AUTOMATE','Runbook',BookOpen],['INTELLIGENCE','Threat Intelligence',Database],['INTELLIGENCE','Global Threat Map',Globe2],['INTELLIGENCE','IP Blocklist',ShieldAlert],['OPERATIONS','Assets',Server],['OPERATIONS','Response Center',Zap],['OPERATIONS','SSH / Sessions',Terminal],['SYSTEM','Audit',FileClock],['SYSTEM','Reports',FileText],['SYSTEM','24-Hour Report',Clock3],['SYSTEM','Detection Rules',SlidersHorizontal],['SYSTEM','Integrations',Network],['SYSTEM','Admin Panel',LockKeyhole],['SYSTEM','Settings',Settings],
 ]
 
 function SeverityBadge({ severity }: { severity: string }) { const c = COLORS[severity.toLowerCase() as keyof typeof COLORS] || COLORS.info; return <span className="badge" style={{color:c, borderColor:`${c}55`, background:`${c}12`}}><span className="severity-dot" style={{background:c}} />{severity}</span> }
@@ -1286,7 +1286,39 @@ function AdminPanel({currentAdmin,setCurrentAdmin}:{currentAdmin:AdminInfo|null;
     <SimpleTable title="Report downloads" headers={['TIMESTAMP','DOWNLOADED BY','FILE','RESULT']} rows={downloadRows} colWidths={['150px','150px',undefined,'110px']} statusCol={-1}/>
   </>
 }
-function WorkspacePage({title,light,setLight,currentAdmin,setCurrentAdmin}:{title:string;light:boolean;setLight:(value:boolean)=>void;currentAdmin:AdminInfo|null;setCurrentAdmin:(a:AdminInfo|null)=>void}){const pages:Record<string,React.ReactNode>={Incidents:<Incidents/>,Investigations:<Investigations/>,Playbooks:<Playbooks/>,Runbook:<Runbook/>, 'Threat Intelligence':<ThreatIntel/>, 'Global Threat Map':<ThreatMap/>,Assets:<Assets/>, 'Response Center':<ResponseCenter/>, 'SSH / Sessions':<SshSessions/>,Audit:<Audit/>,Reports:<Reports/>, '24-Hour Report':<DailyReport/>, 'Detection Rules':<DetectionRules/>,Integrations:<Integrations/>, 'Admin Panel':<AdminPanel currentAdmin={currentAdmin} setCurrentAdmin={setCurrentAdmin}/>,Settings:<SettingsPage light={light} setLight={setLight}/>};return pages[title] || null}
+type ApiBlocklistStats = { total_entries:number; by_category:Record<string,number>; by_source:Record<string,number>; feeds_file_present:boolean; blocks_alerted:number }
+type ApiBlocklistMatch = { ip:string; category:string; label:string; network:string; source:string }
+// VPN / Tor / proxy IPs that are refused on arrival (threat-intelligence/anonymizer_blocklist.txt,
+// plus the optional downloaded feeds). Counts come from GET /blocklist; the lookup box uses GET /blocklist/check.
+function IpBlocklist(){
+  const [stats,setStats]=useState<ApiBlocklistStats|null>(null)
+  const [apiError,setApiError]=useState(false)
+  const [q,setQ]=useState('203.0.113.9')
+  const [checked,setChecked]=useState<{ip:string; match:ApiBlocklistMatch|null}|null>(null)
+  const [checking,setChecking]=useState(false)
+  useEffect(()=>{
+    let cancelled=false
+    const load=()=>fetchJSON<ApiBlocklistStats>('/blocklist').then(d=>{ if(!cancelled){ setStats(d); setApiError(false) } }).catch(()=>{ if(!cancelled) setApiError(true) })
+    load()
+    const t=setInterval(load,10_000)
+    return ()=>{ cancelled=true; clearInterval(t) }
+  },[])
+  const check=async()=>{
+    const value=q.trim()
+    if(!value) return
+    setChecking(true)
+    try{ setChecked(await fetchJSON<{ip:string; match:ApiBlocklistMatch|null}>(`/blocklist/check?ip=${encodeURIComponent(value)}`)); setApiError(false) }
+    catch{ setApiError(true); setChecked(null) }
+    finally{ setChecking(false) }
+  }
+  const n=(v:number|undefined)=>stats ? (v ?? 0).toLocaleString() : '—'
+  return <><div className="page-title"><div><div className="eyebrow">INTELLIGENCE / IDENTITY MASKING</div><h1>IP Blocklist</h1></div></div><ApiNotice show={apiError}/>
+    <div className="action-tiles"><div className="action-tile"><span>Blocklist entries</span><strong>{n(stats?.total_entries)}</strong></div><div className="action-tile"><span>VPN</span><strong>{n(stats?.by_category.vpn)}</strong></div><div className="action-tile"><span>Tor exit nodes</span><strong>{n(stats?.by_category.tor)}</strong></div><div className="action-tile"><span>Open proxies</span><strong>{n(stats?.by_category.proxy)}</strong></div><div className="action-tile"><span>Connections blocked</span><strong>{n(stats?.blocks_alerted)}</strong></div></div>
+    <div className="investigation-search"><Search size={15}/><input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') check()}} placeholder="Check an IP against the blocklist"/><button className="primary-btn" onClick={check} disabled={checking}>Check</button></div>
+    {checked && <Panel title={`Result · ${checked.ip}`}>{checked.match ? <div className="ioc-result"><div className="ioc-field"><span>Verdict</span><strong style={{color:'var(--red, #d96b6b)'}}>BLOCKED</strong></div><div className="ioc-field"><span>Type</span><strong>{checked.match.category.toUpperCase()}</strong></div><div className="ioc-field"><span>Matched range</span><strong className="mono">{checked.match.network}</strong></div><div className="ioc-field"><span>Label</span><strong>{checked.match.label}</strong></div><div className="ioc-field"><span>From list</span><strong>{checked.match.source}</strong></div></div> : <p className="muted" style={{margin:0}}>Not on the blocklist, so this address is allowed through.</p>}</Panel>}
+    <p className="muted" style={{padding:'12px 0 0',lineHeight:1.6}}>Requests from these addresses are refused by the target app before they reach the login page, and the SOAR blocks the IP automatically instead of waiting for approval. The shipped entries are demo ranges; run <span className="mono">python threat-intelligence/update_blocklist.py</span> once, with internet, to load the public Tor exit-node and VPN lists{stats?.feeds_file_present ? ' (already loaded)' : ''}. Private and local addresses are never blocked.</p></>
+}
+function WorkspacePage({title,light,setLight,currentAdmin,setCurrentAdmin}:{title:string;light:boolean;setLight:(value:boolean)=>void;currentAdmin:AdminInfo|null;setCurrentAdmin:(a:AdminInfo|null)=>void}){const pages:Record<string,React.ReactNode>={Incidents:<Incidents/>,Investigations:<Investigations/>,Playbooks:<Playbooks/>,Runbook:<Runbook/>, 'Threat Intelligence':<ThreatIntel/>, 'Global Threat Map':<ThreatMap/>,'IP Blocklist':<IpBlocklist/>,Assets:<Assets/>, 'Response Center':<ResponseCenter/>, 'SSH / Sessions':<SshSessions/>,Audit:<Audit/>,Reports:<Reports/>, '24-Hour Report':<DailyReport/>, 'Detection Rules':<DetectionRules/>,Integrations:<Integrations/>, 'Admin Panel':<AdminPanel currentAdmin={currentAdmin} setCurrentAdmin={setCurrentAdmin}/>,Settings:<SettingsPage light={light} setLight={setLight}/>};return pages[title] || null}
 
 export default function Page() { const [collapsed,setCollapsed]=useState(false); const [active,setActive]=useState('Overview'); const [selected,setSelected]=useState<Alert|null>(null); const [search,setSearch]=useState(''); const [light,setLight]=useState(false); const [scrolling,setScrolling]=useState(false); const [refreshKey,setRefreshKey]=useState(0); const [actionBusy,setActionBusy]=useState(false); const [actionError,setActionError]=useState<string|null>(null); const [alertCount,setAlertCount]=useState<number|null>(null); const [incidentCount,setIncidentCount]=useState<number|null>(null); const [pendingCount,setPendingCount]=useState<number|null>(null);
   // Signed-in admin (Admin Panel tab). Starts null on first render (same

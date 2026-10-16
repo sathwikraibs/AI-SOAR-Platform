@@ -34,6 +34,9 @@ _RULES = [
     (["malware", "trojan", "backdoor"], "T1204", "User Execution"),
     (["dos", "denial of service", "flood"], "T1498", "Network Denial of Service"),
     (["sql injection", "xss", "web attack", "path traversal", "directory traversal"], "T1190", "Exploit Public-Facing Application"),
+    # Last on purpose: only labels alerts nothing above matched, so a brute
+    # force that happens to come from a Tor exit node stays T1110.
+    (["anonymizing network", "anonymizer", "tor exit"], "T1090", "Proxy"),
 ]
 
 UNKNOWN_TECHNIQUE = ("T1000-UNK", "Unmapped / Needs Manual Triage")

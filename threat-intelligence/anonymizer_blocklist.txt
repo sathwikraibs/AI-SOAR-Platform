@@ -1,0 +1,23 @@
+# Anonymizer blocklist -- VPN, Tor exit nodes and open proxies.
+# Anything in these ranges is refused by the target app on arrival and
+# raised as an alert by the SOAR (see ip_blocklist.py).
+#
+# Format, one per line:   <ip or CIDR>   <category: vpn|tor|proxy|custom>   [label]
+# Edit this file freely; changes are picked up within a few seconds.
+#
+# The entries below are DEMO entries. They use the three address blocks that
+# RFC 5737 reserves for documentation (they never appear on the real
+# internet), so the feature can be shown safely and offline: send a request
+# with the header  X-Forwarded-For: 203.0.113.9  and it will be blocked.
+#
+# For the real thing, run:  python threat-intelligence/update_blocklist.py
+# That downloads the public Tor exit-node list and a public VPN range list
+# into anonymizer_blocklist_feeds.txt (read together with this file). Run it
+# once while you have internet; after that everything works offline.
+
+203.0.113.0/24    vpn     DEMO-VPN
+198.51.100.0/24   tor     DEMO-TOR-EXIT
+192.0.2.0/24      proxy   DEMO-OPEN-PROXY
+
+# Add your own, for example an address you want shut out for good:
+# 45.155.205.233    custom  repeat-offender

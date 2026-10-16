@@ -93,6 +93,44 @@ def decide_response(severity: str, enrichment: dict):
     return playbook_key, PLAYBOOKS[playbook_key]
 
 
+def _is_source_ip_block_step(action: str) -> bool:
+    text = action.lower()
+    return text.startswith("block source ip") or text.startswith("block related ip")
+
+
+def add_immediate_ip_block(playbook: dict, match: dict) -> dict:
+    """
+    For an alert whose source IP is on the anonymizer (VPN / Tor / proxy)
+    blocklist: returns a version of `playbook` that blocks the IP right
+    away, instead of waiting for an analyst to approve it.
+
+    Why automatic: an attacker behind an anonymizing network can't be
+    identified or pursued afterwards, and the blocklist match is a fact
+    (the IP is in the list), not a model's guess -- so, unlike a
+    reputation-score block, there's little risk of blocking the wrong
+    thing.
+
+    - If the alert would otherwise only be "monitor only" (nothing else
+      notable about it), the dedicated "anonymizer_block" playbook is used.
+    - Otherwise the alert keeps its own playbook (credential attack, web
+      attack, ...) with the automatic block steps put in front. That
+      playbook's own "Block source IP ..." approval steps are dropped
+      because they would now be redundant; every other step is kept.
+    """
+    category = str(match.get("category", "anonymizer")).upper()
+    label = match.get("label", "")
+    block_step = {"action": f"Block source IP immediately -- matched anonymizer blocklist ({category}: {label})", "auto": True}
+
+    only_monitoring = all(s["action"].lower().startswith("no automated action") for s in playbook["steps"])
+    if only_monitoring:
+        dedicated = PLAYBOOKS["anonymizer_block"]
+        return {**dedicated, "steps": [block_step] + dedicated["steps"][1:]}
+
+    deny_step = {"action": "Add IP to the permanent deny list (identity-masking network)", "auto": True}
+    kept = [s for s in playbook["steps"] if s["auto"] or not _is_source_ip_block_step(s["action"])]
+    return {**playbook, "steps": [block_step, deny_step] + kept}
+
+
 def execute_response(playbook_key: str, playbook: dict, alert_context: dict | None = None):
     """
     "Executes" only the playbook's auto=True steps now (logs them -- no

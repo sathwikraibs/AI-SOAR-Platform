@@ -35,6 +35,7 @@ RULE_KEY_CREDENTIAL_STUFFING = "credential_stuffing"
 RULE_KEY_PATH_TRAVERSAL = "path_traversal"
 RULE_KEY_SUSPICIOUS_FILE_UPLOAD = "suspicious_file_upload"
 RULE_KEY_MULTI_STAGE_CORRELATION = "multi_stage_correlation"
+RULE_KEY_ANONYMIZER_BLOCK = "anonymizer_ip_block"
 
 TARGET_APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target-app")
 ACCESS_LOG_PATH = os.path.join(TARGET_APP_DIR, "logs", "access.log")
@@ -65,6 +66,12 @@ CRED_STUFFING_WINDOW_SECONDS = 60
 _ip_activity: dict[str, deque] = defaultdict(deque)  # ip -> deque[(timestamp, kind)]
 _correlated_alerted: set[str] = set()
 CORRELATION_WINDOW_SECONDS = 120
+
+# --- anonymizer-block state: the target app logs ANONYMIZER_BLOCKED at most
+# every 30s per IP already; this is a second guard so a long-lived visitor
+# produces one alert per cooldown, not one per log line. ---
+_anon_alerted_at: dict[str, float] = {}
+ANON_ALERT_COOLDOWN_SECONDS = 120
 
 
 def _parse_fields(field_str: str) -> dict:
@@ -256,6 +263,33 @@ def process_new_lines(new_lines: list[str]) -> list[dict]:
             # intentionally not turned into its own alert (it would just
             # spam one alert per rejected request from a known-blocked IP).
             pass
+
+        elif event == "ANONYMIZER_BLOCKED":
+            # The target app refused this request on arrival because the
+            # source IP is on the VPN / Tor / proxy blocklist (see
+            # threat-intelligence/ip_blocklist.py). The block already
+            # happened -- this raises the alert so an analyst can see that
+            # someone tried to reach the app while hiding their identity.
+            # (Switching this rule off only silences the alert; the app
+            # keeps blocking.)
+            if is_enabled(RULE_KEY_ANONYMIZER_BLOCK) and now - _anon_alerted_at.get(ip, 0.0) >= ANON_ALERT_COOLDOWN_SECONDS:
+                _anon_alerted_at[ip] = now
+                category = fields.get("category", "unknown").upper()
+                label = fields.get("label", "unlabelled").replace("_", " ")
+                findings.append(
+                    {
+                        "source": "Target-App",
+                        "description": (
+                            f"Connection from an anonymizing network blocked immediately: {ip} is on the "
+                            f"{category} blocklist ({label}) and its request to {fields.get('path', '/')} was "
+                            f"refused before reaching the application -- the visitor was hiding their real "
+                            f"identity behind a VPN, Tor or proxy"
+                        ),
+                        "ip": ip,
+                        "hash": None,
+                        "rule_key": RULE_KEY_ANONYMIZER_BLOCK,
+                    }
+                )
 
         elif event == "SUSPICIOUS_FILE_UPLOADED":
             if is_enabled(RULE_KEY_SUSPICIOUS_FILE_UPLOAD):

@@ -5,9 +5,9 @@ Watches this machine in real time and automatically calls the existing
 AI-SOAR pipeline (classify → enrich → score → respond) reacts to a real
 action on the box instead of only to manually-submitted alerts.
 
-This does **not** change `backend/`, `ai-model/`, `threat-intelligence/`,
-or `response-engine/` at all. It's just a new client of the API that
-already exists.
+The watcher talks to the backend only through the existing `POST /alerts`
+API; every alert it sends goes through the same classify, enrich, score,
+respond pipeline as a hand-submitted one.
 
 ## What it detects
 
@@ -17,10 +17,16 @@ already exists.
 | Brute-force login | Tails `/var/log/auth.log` (or `/var/log/secure`) for repeated failed logins from the same IP within 60s | `rules.py: check_brute_force()` |
 | Connection to known-bad IP | Polls active network connections, flags any to an IP in `KNOWN_BAD_IPS` | `rules.py: check_bad_ip_connections()` |
 
-Plus five more rules in `rules_target.py`, watching `target-app/`'s own
+Plus more rules in `rules_target.py`, watching `target-app/`'s own
 login and file-upload activity (login brute force, credential stuffing,
-path traversal, suspicious file upload, and cross-signal multi-stage
-correlation) — see that file's docstring for details.
+path traversal, suspicious file upload, cross-signal multi-stage
+correlation, and VPN / Tor / proxy blocking) — see that file's docstring
+for details.
+
+| Rule | How | File |
+|---|---|---|
+| Ransomware / mass file encryption | Compares the target app's file store (`target-app/uploads/`) with the previous scan: new `.locked`-style extensions, files rewritten from readable data into random-looking bytes (entropy jump), ransom notes. Raised as a Critical alert, MITRE T1486 | `rules_ransomware.py: check_ransomware()` |
+| VPN / Tor / proxy IP block | The target app refuses requests from IPs on `threat-intelligence/anonymizer_blocklist.txt` and logs `ANONYMIZER_BLOCKED`; this rule turns that into an alert | `rules_target.py` |
 
 ## Turning a rule on/off from the dashboard
 
@@ -62,6 +68,37 @@ pip install -r ../requirements.txt   # adds psutil to the existing deps
    appears in `GET /alerts` / the dashboard, already classified, enriched,
    risk-scored, and with a response playbook attached — with zero manual
    `POST /alerts` call.
+
+## Demo: ransomware on the SCADA file store
+
+With the backend and `watcher.py` running (watch the watcher's terminal):
+
+```bash
+python3 detection-agent/simulate_ransomware.py attack    # creates demo SCADA files, then "encrypts" them
+python3 detection-agent/simulate_ransomware.py restore   # decrypts them again and removes the ransom note
+python3 detection-agent/simulate_ransomware.py cleanup   # restore, then delete the demo files
+```
+
+Within about 10 seconds of `attack` starting (it first waits 6 seconds so the watcher records the normal state), a **Critical**
+"Ransomware encryption activity" alert appears, mapped to T1486 and given the ransomware containment
+playbook. The simulator only ever touches the demo files it created itself, inside `target-app/uploads/`,
+and is fully reversible (use `restore` to repeat the demo). The rule re-arms once the encrypted files and
+the note are gone. It reads a folder on the machine the watcher runs on, so it works with `watcher.py`
+(local target app), not with a target app hosted on PythonAnywhere.
+
+## Demo: blocking a VPN / Tor user
+
+The shipped blocklist contains clearly-labelled demo ranges (`203.0.113.0/24` VPN, `198.51.100.0/24` Tor,
+`192.0.2.0/24` proxy). The target app trusts the `X-Forwarded-For` header, so from a second terminal:
+
+```bash
+curl -i -H "X-Forwarded-For: 203.0.113.9" http://localhost:5000/login
+```
+
+returns `403 Access denied`, even with the correct password, and within seconds an alert for
+the blocked connection appears with the "Anonymizer Network Block" playbook already executed.
+To load the real public Tor exit-node and VPN lists (once, with internet; the result is a local file and
+works offline afterwards): `python3 threat-intelligence/update_blocklist.py`.
 
 ## Before presenting
 

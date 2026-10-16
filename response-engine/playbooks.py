@@ -67,6 +67,14 @@ PLAYBOOKS = {
             {"action": "Notify SOC analyst", "auto": True},
         ],
     },
+    "anonymizer_block": {
+        "name": "Anonymizer Network Block (VPN / Tor / Proxy)",
+        "steps": [
+            {"action": "Block source IP immediately -- matched anonymizer blocklist", "auto": True},
+            {"action": "Add IP to the permanent deny list (identity-masking network)", "auto": True},
+            {"action": "Notify SOC analyst", "auto": True},
+        ],
+    },
     "standard_triage": {
         "name": "Standard Analyst Triage",
         "steps": [

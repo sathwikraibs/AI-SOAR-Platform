@@ -36,10 +36,11 @@ elsewhere, copy `.env.example` to `.env.local` and set
 | Audit | Real — `GET /audit` (a real `audit_log` table, written on every alert ingestion and every approve/reject) |
 | Integrations | Real — `GET /integrations/status` (whether `ABUSEIPDB_API_KEY` / `VIRUSTOTAL_API_KEY` / `SOAR_SLACK_WEBHOOK_URL` are actually configured) |
 | SSH / Sessions (connect form) | Real — `POST /ssh/connect` (runs a fixed, read-only diagnostic: `whoami` / `hostname` / `uptime` — see `backend/ssh_manager.py` for why it doesn't accept an arbitrary command) |
+| IP Blocklist | Real — `GET /blocklist` / `GET /blocklist/check?ip=` (VPN, Tor and proxy ranges from `threat-intelligence/anonymizer_blocklist.txt`) |
 | Reports | Real — `GET /reports` |
 | Alert approve/reject (drawer) | Real — `POST /alerts/{id}/approve` / `/reject` |
 | SSH / Sessions (session log table) | Real — `GET /ssh/sessions` (a real `ssh_sessions` table, written on every `/ssh/connect` attempt, success or failure) |
-| Detection Rules | Real — `GET /detection-rules` / `POST /detection-rules/{key}/toggle`. These are the 8 actual detection points in `detection-agent/rules.py` and `rules_target.py` (tagged with a `rule_key` on every finding they produce). Toggling a rule writes to a shared `detection_rule_state` table; `detection-agent` (all three watcher variants — local, HTTP, remote-SSH) polls `GET /detection-rules` every few seconds via `detection-agent/rule_state.py` and skips disabled rules on its next cycle, so the switch genuinely turns detection on/off rather than just changing a UI label. |
+| Detection Rules | Real — `GET /detection-rules` / `POST /detection-rules/{key}/toggle`. These are the 10 actual detection points in `detection-agent/rules.py`, `rules_target.py` and `rules_ransomware.py` (tagged with a `rule_key` on every finding they produce). Toggling a rule writes to a shared `detection_rule_state` table; `detection-agent` (all three watcher variants — local, HTTP, remote-SSH) polls `GET /detection-rules` every few seconds via `detection-agent/rule_state.py` and skips disabled rules on its next cycle, so the switch genuinely turns detection on/off rather than just changing a UI label. |
 
 Everything in the table above is real; there's nothing left that's UI-only demo data.
 

@@ -26,6 +26,7 @@ import requests
 
 from rules import ALL_RULES, prime_auth_log_position
 from rules_target import ALL_TARGET_RULES, prime_target_log_position
+from rules_ransomware import ALL_RANSOMWARE_RULES, prime_ransomware_state
 
 API_URL = "http://localhost:8000/alerts"
 POLL_INTERVAL_SECONDS = 3
@@ -61,15 +62,17 @@ def main():
     print(
         "[detection-agent] Rules active: suspicious process spawn, OS brute-force login, "
         "known-bad-IP connection, target-app login brute-force, target-app file upload "
-        "(VirusTotal via existing pipeline), cross-signal correlation"
+        "(VirusTotal via existing pipeline), cross-signal correlation, "
+        "ransomware file-encryption monitor, VPN/Tor/proxy IP block"
     )
 
     prime_auth_log_position()
     prime_target_log_position()
+    prime_ransomware_state()
 
     try:
         while True:
-            for rule in ALL_RULES + ALL_TARGET_RULES:
+            for rule in ALL_RULES + ALL_TARGET_RULES + ALL_RANSOMWARE_RULES:
                 for finding in rule():
                     post_alert(finding)
             time.sleep(POLL_INTERVAL_SECONDS)

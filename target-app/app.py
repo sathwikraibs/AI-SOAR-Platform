@@ -35,6 +35,7 @@ pass the same value as SOAR_LOGS_TOKEN on the watcher side.
 
 import hashlib
 import os
+import sys
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -127,6 +128,53 @@ def client_ip() -> str:
     # Respect a proxy header if present (harmless for this demo, and a
     # realistic touch), otherwise the direct remote address.
     return request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+
+
+# --- anonymizer (VPN / Tor / open-proxy) blocklist ---------------------------
+# Requests from a listed network are refused before they reach any page, so
+# an attacker hiding behind a VPN or Tor never gets as far as the login form.
+# The list lives in threat-intelligence/ (shared with the SOAR backend). When
+# this app is deployed on its own (e.g. PythonAnywhere), copy ip_blocklist.py
+# and anonymizer_blocklist.txt next to this file and they are used instead.
+# If neither is found the app runs exactly as before, just without this check.
+ip_blocklist = None
+for _bl_dir in (BASE_DIR, os.path.join(BASE_DIR, "..", "threat-intelligence")):
+    if os.path.exists(os.path.join(_bl_dir, "ip_blocklist.py")):
+        sys.path.append(os.path.abspath(_bl_dir))
+        try:
+            import ip_blocklist  # noqa: E402
+            break
+        except Exception as _exc:  # noqa: BLE001 - a broken blocklist must never take the app down
+            print(f"[target-app] WARNING: could not load ip_blocklist ({_exc}); anonymizer blocking is off")
+            ip_blocklist = None
+
+# These stay reachable even from a listed IP: the health check, and the log
+# endpoint the SOAR watcher uses (it has its own token).
+_ANON_EXEMPT_PATHS = {"/health", "/internal/logs"}
+ANON_LOG_INTERVAL_SECONDS = 30  # log a repeat visitor at most this often, so a flood doesn't flood the log
+_anon_last_logged: dict[str, float] = {}
+
+
+@app.before_request
+def block_anonymizer_networks():
+    if ip_blocklist is None or request.path in _ANON_EXEMPT_PATHS:
+        return None
+    match = ip_blocklist.lookup(client_ip())
+    if match is None:
+        return None
+
+    ip = match["ip"]
+    now = time.time()
+    if now - _anon_last_logged.get(ip, 0.0) >= ANON_LOG_INTERVAL_SECONDS:
+        _anon_last_logged[ip] = now
+        log_event(
+            "ANONYMIZER_BLOCKED",
+            ip=ip,
+            category=match["category"],
+            label=match["label"].replace(" ", "_"),
+            path=request.path.replace(" ", "_"),
+        )
+    return "Access denied: connections from anonymizing networks (VPN, Tor, open proxies) are not permitted.", 403
 
 
 def _is_locked(username: str) -> bool:

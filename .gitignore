@@ -5,6 +5,6 @@ node_modules/
 .next/
 *.tsbuildinfo
 .env.local
-reports/
-target-app/logs/
-target-app/uploads/
+threat-intelligence/anonymizer_blocklist_feeds.txt
+threat-intelligence/anonymizer_blocklist_feeds.txt.tmp
+detection-agent/.ransomware_sim_state.json
