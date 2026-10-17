@@ -23,6 +23,8 @@ import requests
 
 from rules import ALL_RULES, prime_auth_log_position
 from rules_target_http import ALL_HTTP_TARGET_RULES, prime_http_log_position
+from rules_ransomware_http import ALL_REMOTE_RANSOMWARE_RULES, prime_remote_ransomware_state
+from target_sync import ALL_SYNC_RULES, start_background_sync
 
 API_URL = "http://localhost:8000/alerts"
 POLL_INTERVAL_SECONDS = 3
@@ -54,15 +56,17 @@ def post_alert(finding: dict) -> None:
 
 def main():
     print(f"[detection-agent] Starting HTTP watcher -- polling every {POLL_INTERVAL_SECONDS}s")
-    print("[detection-agent] Watching: this PC (process/SSH-brute-force/bad-IP) + deployed target app (via HTTPS poll)")
+    print("[detection-agent] Watching: this PC (process/SSH-brute-force/bad-IP) + deployed target app (via HTTPS poll: logins, uploads, VPN/Tor, ransomware file store)")
     print(f"[detection-agent] Posting findings to {API_URL}")
 
     prime_auth_log_position()
     prime_http_log_position()
+    prime_remote_ransomware_state()
+    start_background_sync()
 
     try:
         while True:
-            for rule in ALL_RULES + ALL_HTTP_TARGET_RULES:
+            for rule in ALL_RULES + ALL_HTTP_TARGET_RULES + ALL_REMOTE_RANSOMWARE_RULES + ALL_SYNC_RULES:
                 for finding in rule():
                     post_alert(finding)
             time.sleep(POLL_INTERVAL_SECONDS)

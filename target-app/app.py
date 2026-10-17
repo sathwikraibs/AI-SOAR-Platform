@@ -34,6 +34,8 @@ pass the same value as SOAR_LOGS_TOKEN on the watcher side.
 """
 
 import hashlib
+import json
+import math
 import os
 import sys
 import time
@@ -148,33 +150,85 @@ for _bl_dir in (BASE_DIR, os.path.join(BASE_DIR, "..", "threat-intelligence")):
             print(f"[target-app] WARNING: could not load ip_blocklist ({_exc}); anonymizer blocking is off")
             ip_blocklist = None
 
-# These stay reachable even from a listed IP: the health check, and the log
-# endpoint the SOAR watcher uses (it has its own token).
+# These stay reachable even from a listed IP: the health check, and the
+# /internal/ endpoints the SOAR watcher uses (each has its own token).
 _ANON_EXEMPT_PATHS = {"/health", "/internal/logs"}
 ANON_LOG_INTERVAL_SECONDS = 30  # log a repeat visitor at most this often, so a flood doesn't flood the log
-_anon_last_logged: dict[str, float] = {}
+_anon_last_logged: dict[tuple, float] = {}
+
+# --- settings the SOAR pushes to this app ---------------------------------------
+# The detection watcher keeps two things in sync (detection-agent/target_sync.py):
+#   auto_block  -- the dashboard's "Block VPN/Tor automatically" switch. On: listed
+#                  visitors get a 403. Off: they are let through, but still logged
+#                  (ANONYMIZER_ALLOWED) so the SOAR can alert, geolocate and show them.
+#   the list    -- the SOAR's full blocklist, saved next to this file so a copy hosted
+#                  elsewhere (PythonAnywhere) blocks exactly what the dashboard shows.
+# Defaults (blocking on, no pushed list) apply until the watcher connects, so the app
+# behaves exactly as before if nothing is ever pushed.
+CONFIG_PATH = os.path.join(BASE_DIR, "runtime_config.json")
+SYNCED_LIST_PATH = os.path.join(BASE_DIR, "anonymizer_blocklist_synced.txt")
+_config_cache: dict = {"mtime": "unset", "data": {"auto_block": True, "blocklist_sha": ""}}
+
+if ip_blocklist is not None:
+    try:
+        ip_blocklist.add_extra_file(SYNCED_LIST_PATH)
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[target-app] WARNING: could not register the pushed blocklist ({_exc})")
+
+
+def get_config() -> dict:
+    """Current pushed settings; re-read when the file changes (works with several worker processes)."""
+    try:
+        mtime = os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        mtime = None
+    if mtime != _config_cache["mtime"]:
+        data = {"auto_block": True, "blocklist_sha": ""}
+        if mtime is not None:
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data["auto_block"] = bool(loaded.get("auto_block", True))
+                    data["blocklist_sha"] = str(loaded.get("blocklist_sha", ""))
+            except (OSError, ValueError):
+                pass
+        _config_cache["mtime"] = mtime
+        _config_cache["data"] = data
+    return _config_cache["data"]
+
+
+def save_config(data: dict) -> None:
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"auto_block": bool(data.get("auto_block", True)), "blocklist_sha": str(data.get("blocklist_sha", ""))}, f)
+    os.replace(tmp, CONFIG_PATH)
 
 
 @app.before_request
 def block_anonymizer_networks():
-    if ip_blocklist is None or request.path in _ANON_EXEMPT_PATHS:
+    if ip_blocklist is None or request.path in _ANON_EXEMPT_PATHS or request.path.startswith("/internal/"):
         return None
     match = ip_blocklist.lookup(client_ip())
     if match is None:
         return None
 
+    blocking = bool(get_config().get("auto_block", True))
+    event = "ANONYMIZER_BLOCKED" if blocking else "ANONYMIZER_ALLOWED"
     ip = match["ip"]
     now = time.time()
-    if now - _anon_last_logged.get(ip, 0.0) >= ANON_LOG_INTERVAL_SECONDS:
-        _anon_last_logged[ip] = now
+    if now - _anon_last_logged.get((event, ip), 0.0) >= ANON_LOG_INTERVAL_SECONDS:
+        _anon_last_logged[(event, ip)] = now
         log_event(
-            "ANONYMIZER_BLOCKED",
+            event,
             ip=ip,
             category=match["category"],
             label=match["label"].replace(" ", "_"),
             path=request.path.replace(" ", "_"),
         )
-    return "Access denied: connections from anonymizing networks (VPN, Tor, open proxies) are not permitted.", 403
+    if blocking:
+        return "Access denied: connections from anonymizing networks (VPN, Tor, open proxies) are not permitted.", 403
+    return None  # auto-block is off: let them through (logged above)
 
 
 def _is_locked(username: str) -> bool:
@@ -467,6 +521,153 @@ def internal_logs():
 
     total_size = os.path.getsize(LOG_PATH)
     return chunk, 200, {"Content-Type": "text/plain", "X-Log-Size": str(total_size)}
+
+
+def _internal_auth() -> None:
+    """Same shared secret as /internal/logs. Wrong or missing token = 403, as if the page didn't exist."""
+    token = request.args.get("token") or request.headers.get("X-Internal-Token")
+    if token != INTERNAL_LOGS_TOKEN:
+        abort(403)
+
+
+@app.route("/internal/config", methods=["GET", "POST"])
+def internal_config():
+    """
+    GET returns the settings this app is running with. POST (from the SOAR's
+    watcher) updates them: {"auto_block": bool, "blocklist_text": str,
+    "blocklist_sha": str} -- every key optional.
+    """
+    _internal_auth()
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        cfg = dict(get_config())
+        if "auto_block" in body:
+            cfg["auto_block"] = bool(body["auto_block"])
+        text = body.get("blocklist_text")
+        if isinstance(text, str):
+            if len(text) > 8_000_000:
+                abort(413)
+            tmp = SYNCED_LIST_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, SYNCED_LIST_PATH)
+            cfg["blocklist_sha"] = str(body.get("blocklist_sha") or "")
+        save_config(cfg)
+    cfg = get_config()
+    return jsonify({"auto_block": cfg["auto_block"], "blocklist_sha": cfg["blocklist_sha"]})
+
+
+# --- file-store snapshot, for ransomware detection on a hosted copy -----------
+# The detection watcher cannot read this server's disk when the app runs on
+# PythonAnywhere, so it asks for a snapshot of the SCADA file store instead and
+# runs the same ransomware checks on it (detection-agent/rules_ransomware.py).
+_RANSOM_NOTE_EXTENSIONS = {".txt", ".html", ".htm", ".hta", ".rtf"}
+_RANSOM_NOTE_NAME_TOKENS = (
+    "decrypt", "ransom", "recover_your", "restore_your", "your_files", "files_encrypted",
+    "encrypted_files", "how_to_recover", "how_to_restore", "please_read_me",
+)
+_RANSOM_NOTE_CONTENT_WORDS = ("bitcoin", "btc", "monero", "decrypt", "ransom", "your files", "wallet", "encrypted")
+_SNAPSHOT_MAX_FILES = 500
+_SNAPSHOT_ENTROPY_BYTES = 65536
+_SNAPSHOT_MIN_BYTES = 128
+_entropy_memo: dict[str, tuple] = {}   # path -> (mtime, size, entropy)
+
+
+def _shannon_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    counts = [0] * 256
+    for b in data:
+        counts[b] += 1
+    total = len(data)
+    return -sum((c / total) * math.log2(c / total) for c in counts if c)
+
+
+def _snapshot_entropy(path: str, mtime: float, size: int):
+    memo = _entropy_memo.get(path)
+    if memo and memo[0] == mtime and memo[1] == size:
+        return memo[2]
+    try:
+        with open(path, "rb") as f:
+            data = f.read(_SNAPSHOT_ENTROPY_BYTES)
+    except OSError:
+        return None
+    value = _shannon_entropy(data) if len(data) >= _SNAPSHOT_MIN_BYTES else None
+    _entropy_memo[path] = (mtime, size, value)
+    return value
+
+
+def _snapshot_is_note(path: str, name: str, size: int) -> bool:
+    low = name.lower()
+    if os.path.splitext(low)[1] not in _RANSOM_NOTE_EXTENSIONS:
+        return False
+    if any(token in low for token in _RANSOM_NOTE_NAME_TOKENS):
+        return True
+    if size > 8192:
+        return False
+    try:
+        with open(path, "r", errors="ignore") as f:
+            text = f.read(8192).lower()
+    except OSError:
+        return False
+    return sum(1 for w in _RANSOM_NOTE_CONTENT_WORDS if w in text) >= 2
+
+
+@app.route("/internal/files")
+def internal_files():
+    """State of the uploads folder: name, size, modified time, entropy, and whether it looks like a ransom note."""
+    _internal_auth()
+    files = []
+    for root, _dirs, names in os.walk(UPLOAD_DIR):
+        for name in names:
+            if name.startswith("."):
+                continue
+            if len(files) >= _SNAPSHOT_MAX_FILES:
+                break
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            files.append({
+                "path": os.path.relpath(path, UPLOAD_DIR).replace(os.sep, "/"),
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "entropy": _snapshot_entropy(path, st.st_mtime, st.st_size),
+                "note": _snapshot_is_note(path, name, st.st_size),
+            })
+    return jsonify({"files": files})
+
+
+# --- demo-only ransomware trigger -----------------------------------------------
+# Lets detection-agent/simulate_ransomware_remote.py stage a (harmless, reversible)
+# ransomware attack on this server's demo files. Off unless ENABLE_DEMO_ENDPOINTS=1.
+DEMO_STATE_PATH = os.path.join(BASE_DIR, ".ransomware_demo_state.json")
+try:
+    from ransomware_demo import Demo as _RansomwareDemo
+except ImportError:  # the module wasn't copied next to app.py
+    _RansomwareDemo = None
+
+
+@app.route("/internal/demo/ransomware", methods=["POST"])
+def internal_demo_ransomware():
+    _internal_auth()
+    if os.environ.get("ENABLE_DEMO_ENDPOINTS") != "1" or _RansomwareDemo is None:
+        return jsonify({"ok": False, "message": "Demo endpoints are off. Set ENABLE_DEMO_ENDPOINTS=1 on the server and make sure ransomware_demo.py is next to app.py."}), 403
+    body = request.get_json(silent=True) or {}
+    action = body.get("action") or request.args.get("action")
+    demo = _RansomwareDemo(UPLOAD_DIR, DEMO_STATE_PATH)
+    handlers = {
+        "prepare": demo.prepare,
+        "encrypt_next": demo.encrypt_next,
+        "note": demo.drop_note,
+        "restore": demo.restore,
+        "cleanup": demo.cleanup,
+        "status": demo.status,
+    }
+    if action not in handlers:
+        return jsonify({"ok": False, "message": f"Unknown action. Use one of: {', '.join(handlers)}"}), 400
+    return jsonify(handlers[action]())
 
 
 if __name__ == "__main__":

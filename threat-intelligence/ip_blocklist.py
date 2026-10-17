@@ -35,6 +35,8 @@ import time
 _DIR = os.path.dirname(os.path.abspath(__file__))
 CURATED_FILE = os.path.join(_DIR, "anonymizer_blocklist.txt")
 FEEDS_FILE = os.path.join(_DIR, "anonymizer_blocklist_feeds.txt")
+# Entries added from the dashboard ("Add IP / range"). Not committed to git.
+CUSTOM_FILE = os.path.join(_DIR, "anonymizer_blocklist_custom.txt")
 
 VALID_CATEGORIES = {"vpn", "tor", "proxy", "custom"}
 
@@ -58,6 +60,10 @@ _prefix_max_end: dict[int, list[int]] = {4: [], 6: []}
 _file_mtimes: dict[str, float] = {}
 _last_check = 0.0
 _loaded = False
+# Extra files a host program can register (the target app registers the list
+# the SOAR pushes to it). Not used by the backend.
+_extra_files: list[str] = []
+_export_cache: tuple[str, str] | None = None   # (text, sha256), rebuilt after every reload
 
 
 def normalize_ip(raw) -> str | None:
@@ -117,13 +123,13 @@ def _parse_file(path: str) -> list[tuple]:
 
 def reload() -> None:
     """Re-reads both blocklist files from disk."""
-    global _loaded, _file_mtimes
+    global _loaded, _file_mtimes, _export_cache
     for v in (4, 6):
         _starts[v], _entries[v], _prefix_max_end[v] = [], [], []
 
     collected: dict[int, list[tuple]] = {4: [], 6: []}
     new_mtimes = {}
-    for path in (CURATED_FILE, FEEDS_FILE):
+    for path in (CURATED_FILE, FEEDS_FILE, CUSTOM_FILE, *_extra_files):
         new_mtimes[path] = os.path.getmtime(path) if os.path.exists(path) else 0.0
         for version, start, end, category, label, net_str, src in _parse_file(path):
             collected[version].append((start, end, category, label, net_str, src))
@@ -141,6 +147,7 @@ def reload() -> None:
 
     _file_mtimes = new_mtimes
     _loaded = True
+    _export_cache = None
 
 
 def _ensure_fresh() -> None:
@@ -186,6 +193,107 @@ def lookup(raw_ip) -> dict | None:
     return None
 
 
+def add_extra_file(path: str) -> None:
+    """Registers one more list file to read (used by the target app for the list the SOAR pushes to it)."""
+    path = os.path.abspath(path)
+    if path not in _extra_files:
+        _extra_files.append(path)
+    reload()
+
+
+def export_text() -> tuple[str, str]:
+    """
+    Every loaded entry as list-file text, plus its sha256. The SOAR uses this to
+    keep a separately hosted target app's list identical to its own.
+    """
+    global _export_cache
+    _ensure_fresh()
+    if _export_cache is None:
+        import hashlib
+
+        lines = []
+        for v in (4, 6):
+            for _s, _e, category, label, net_str, _src in _entries[v]:
+                lines.append(f"{net_str} {category} {label}")
+        text = "\n".join(lines) + ("\n" if lines else "")
+        _export_cache = (text, hashlib.sha256(text.encode("utf-8")).hexdigest())
+    return _export_cache
+
+
+def validate_entry(entry: str):
+    """Returns (network, None) for a usable IP/CIDR, or (None, reason) if it can't be blocked."""
+    try:
+        net = ipaddress.ip_network(str(entry).strip(), strict=False)
+    except ValueError:
+        return None, "Not a valid IP address or CIDR range"
+    if any(net.version == n.version and net.subnet_of(n) for n in _NEVER_BLOCK):
+        return None, "Private, loopback and link-local addresses can never be blocked"
+    if net.prefixlen < (8 if net.version == 4 else 32):
+        return None, "Range is too large (shorter than /8 for IPv4)"
+    return net, None
+
+
+def _custom_lines() -> list[str]:
+    try:
+        with open(CUSTOM_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            return [ln.rstrip("\n") for ln in f]
+    except FileNotFoundError:
+        return []
+
+
+def list_custom_entries() -> list[dict]:
+    rows = []
+    for line in _custom_lines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        rows.append({
+            "entry": parts[0],
+            "category": parts[1] if len(parts) > 1 else "custom",
+            "label": parts[2] if len(parts) > 2 else "",
+        })
+    return rows
+
+
+def add_custom_entry(entry: str, category: str = "vpn", label: str = "") -> tuple[dict | None, str | None]:
+    """Adds an IP/CIDR to the dashboard-managed list. Returns (row, None) or (None, reason)."""
+    net, reason = validate_entry(entry)
+    if net is None:
+        return None, reason
+    category = (category or "custom").lower()
+    if category not in VALID_CATEGORIES:
+        category = "custom"
+    label = " ".join((label or "").split())[:60] or category.upper()
+    line = f"{net} {category} {label}"
+    existing = {ln.split(None, 1)[0] for ln in (l.strip() for l in _custom_lines()) if ln and not ln.startswith("#")}
+    if str(net) not in existing:
+        with open(CUSTOM_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        reload()
+    return {"entry": str(net), "category": category, "label": label}, None
+
+
+def remove_custom_entry(entry: str) -> bool:
+    """Removes an entry from the dashboard-managed list. True if something was removed."""
+    try:
+        target = str(ipaddress.ip_network(str(entry).strip(), strict=False))
+    except ValueError:
+        return False
+    kept, removed = [], False
+    for line in _custom_lines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped.split(None, 1)[0] == target:
+            removed = True
+            continue
+        kept.append(line)
+    if removed:
+        with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+        reload()
+    return removed
+
+
 def stats() -> dict:
     """Counts for the dashboard / API."""
     _ensure_fresh()
@@ -200,6 +308,7 @@ def stats() -> dict:
         "by_category": by_category,
         "by_source": by_source,
         "feeds_file_present": os.path.exists(FEEDS_FILE),
+        "custom_entries": len(list_custom_entries()),
     }
 
 

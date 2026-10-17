@@ -81,10 +81,23 @@ python3 detection-agent/simulate_ransomware.py cleanup   # restore, then delete 
 
 Within about 10 seconds of `attack` starting (it first waits 6 seconds so the watcher records the normal state), a **Critical**
 "Ransomware encryption activity" alert appears, mapped to T1486 and given the ransomware containment
-playbook. The simulator only ever touches the demo files it created itself, inside `target-app/uploads/`,
-and is fully reversible (use `restore` to repeat the demo). The rule re-arms once the encrypted files and
-the note are gone. It reads a folder on the machine the watcher runs on, so it works with `watcher.py`
-(local target app), not with a target app hosted on PythonAnywhere.
+playbook, and the dashboard shows a red banner and fills its Ransomware page. The simulator only ever touches the demo files
+it created itself, inside `target-app/uploads/`, and is fully reversible. The rule re-arms once the encrypted files and the note are gone.
+
+### Target app hosted on PythonAnywhere
+
+`watcher_http.py` polls the hosted app's token-protected `/internal/files` listing (name, size, modified time, entropy, ransom-note flag) and runs the same detection logic.
+`simulate_ransomware_remote.py` asks the hosted app to stage the attack on its own demo files:
+
+1. Upload `target-app/app.py` and `target-app/ransomware_demo.py`; in the WSGI file set `INTERNAL_LOGS_TOKEN` and `ENABLE_DEMO_ENDPOINTS=1`; reload the web app.
+2. Set `SOAR_TARGET_URL` and `SOAR_LOGS_TOKEN` (same value as `INTERNAL_LOGS_TOKEN`) on your PC, start `watcher_http.py`.
+3. `python3 detection-agent/simulate_ransomware_remote.py attack`, then `restore` or `cleanup`.
+
+## Config sync to the hosted target app
+
+The hosted app cannot call your private backend, so `target_sync.py` (inside `watcher.py` and `watcher_http.py`) pushes two things to its `/internal/config` every few seconds, only when they changed:
+the dashboard's **Block VPN/Tor automatically** switch, and the full blocklist (including entries added from the dashboard). If the push fails it warns once and retries after a minute.
+When blocking is OFF, the target app lets the user in and logs `ANONYMIZER_ALLOWED`; `rules_target.py` turns that into a High alert (rule key `anonymizer_ip_detected`) that carries the IP and, via the backend, the country.
 
 ## Demo: blocking a VPN / Tor user
 

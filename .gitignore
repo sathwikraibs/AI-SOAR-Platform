@@ -8,3 +8,13 @@ node_modules/
 threat-intelligence/anonymizer_blocklist_feeds.txt
 threat-intelligence/anonymizer_blocklist_feeds.txt.tmp
 detection-agent/.ransomware_sim_state.json
+threat-intelligence/anonymizer_blocklist_custom.txt
+target-app/runtime_config.json
+target-app/anonymizer_blocklist_synced.txt
+target-app/.ransomware_demo_state.json
+endpoint-agent/malicious_domains_feed.txt
+endpoint-agent/malicious_domains_feed.txt.tmp
+target-app/logs/
+
+target-app/logs/
+reports/*.pdf

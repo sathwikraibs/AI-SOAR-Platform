@@ -12,6 +12,10 @@ Reference: https://attack.mitre.org/techniques/enterprise/
 # Ordered so more-specific patterns are checked before generic ones.
 # Each entry: (keywords, technique_id, technique_name)
 _RULES = [
+    # Endpoint (Sysmon) acceptable-use findings: first on purpose, because their text
+    # can contain a domain name or program name with words like "malware" in it.
+    (["acceptable-use policy", "acceptable use policy"], "POLICY-AUP", "Acceptable-Use Policy Violation"),
+    (["malicious website", "known-malicious domain"], "T1189", "Drive-by Compromise"),
     (["ransomware", "encrypt", "mass file rename"], "T1486", "Data Encrypted for Impact"),
     (["phishing", "malicious attachment", "malicious link"], "T1566", "Phishing"),
     # NOTE: this used to be ["brute force", "failed login attempts", ...],
@@ -32,6 +36,14 @@ _RULES = [
     (["command and control", "c2 beacon", "beaconing", "callback"], "T1071", "Application Layer Protocol"),
     (["dns tunnel", "unusual dns"], "T1071.004", "Application Layer Protocol: DNS"),
     (["malware", "trojan", "backdoor"], "T1204", "User Execution"),
+    # Endpoint (Sysmon) findings. Placed before the broad "dos" keyword below so
+    # a command line that happens to contain those letters can't hijack them.
+    (["credential dumping", "lsass", "mimikatz", "sekurlsa"], "T1003", "OS Credential Dumping"),
+    (["autorun registry key", "autorun folder"], "T1547.001", "Boot or Logon Autostart Execution: Registry Run Keys / Startup Folder"),
+    (["office application"], "T1204.002", "User Execution: Malicious File"),
+    (["mshta", "regsvr32", "rundll32"], "T1218", "System Binary Proxy Execution"),
+    (["wscript", "cscript"], "T1059", "Command and Scripting Interpreter"),
+    (["certutil", "bitsadmin"], "T1105", "Ingress Tool Transfer"),
     (["dos", "denial of service", "flood"], "T1498", "Network Denial of Service"),
     (["sql injection", "xss", "web attack", "path traversal", "directory traversal"], "T1190", "Exploit Public-Facing Application"),
     # Last on purpose: only labels alerts nothing above matched, so a brute

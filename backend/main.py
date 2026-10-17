@@ -8,7 +8,7 @@ import re
 import secrets
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -40,6 +40,7 @@ from response_engine import (  # noqa: E402
     approve_pending_steps,
     compute_risk_score,
     decide_response,
+    detection_only_anonymizer,
     execute_response,
     response_steps_json,
 )
@@ -133,6 +134,58 @@ def log_audit(db: Session, actor: str, action: str, target: str, source_ip: str 
         print(f"[backend] WARNING: audit log write failed ({exc})")
 
 
+# ---------------------------------------------------------------------------
+# Dashboard-controlled switches (stored in the app_settings table) and the
+# shared token for endpoint agents.
+# ---------------------------------------------------------------------------
+SETTING_VPN_AUTO_BLOCK = "vpn_auto_block"          # default: on
+SETTING_MONITORING_GLOBAL = "monitoring_global"    # default: on (all devices)
+ANONYMIZER_RULE_KEYS = {"anonymizer_ip_block", "anonymizer_ip_detected"}
+RANSOMWARE_RULE_KEYS = {"ransomware_activity", "sysmon_ransomware"}
+RANSOMWARE_ACTIVE_WINDOW = timedelta(minutes=15)   # an incident this recent counts as "in progress"
+
+# If SOAR_AGENT_TOKEN is set on the backend, endpoint agents must send the same
+# value in an X-Agent-Token header. Unset = open, exactly as before.
+AGENT_TOKEN = os.environ.get("SOAR_AGENT_TOKEN", "")
+
+
+def _get_bool_setting(db: Session, key: str, default: bool) -> bool:
+    row = db.query(models.AppSetting).filter(models.AppSetting.key == key).first()
+    if row is None:
+        return default
+    return str(row.value).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _set_bool_setting(db: Session, key: str, value: bool) -> None:
+    row = db.query(models.AppSetting).filter(models.AppSetting.key == key).first()
+    if row is None:
+        row = models.AppSetting(key=key, value="true" if value else "false", updated_at=datetime.utcnow())
+        db.add(row)
+    else:
+        row.value = "true" if value else "false"
+        row.updated_at = datetime.utcnow()
+    db.commit()
+
+
+def _require_agent_token(request: Request) -> None:
+    if AGENT_TOKEN and not secrets.compare_digest(request.headers.get("X-Agent-Token", ""), AGENT_TOKEN):
+        raise HTTPException(status_code=401, detail="Missing or wrong X-Agent-Token")
+
+
+def _monitoring_paused(hostname: str) -> str | None:
+    """Why this device's data is being ignored right now, or None if it is monitored."""
+    db = SessionLocal()
+    try:
+        if not _get_bool_setting(db, SETTING_MONITORING_GLOBAL, True):
+            return "monitoring is switched off for all devices"
+        row = db.query(models.EndpointAgent).filter(models.EndpointAgent.hostname == hostname).first()
+        if row is not None and row.monitoring_enabled is False:
+            return "monitoring is switched off for this device"
+        return None
+    finally:
+        db.close()
+
+
 def alert_to_dict(alert: "models.Alert") -> dict:
     """
     Converts an Alert ORM row into a plain dict for the API response.
@@ -155,6 +208,7 @@ def alert_to_dict(alert: "models.Alert") -> dict:
         "hash": alert.hash,
         "timestamp": alert.timestamp,
         "rule_key": alert.rule_key,
+        "host": alert.host,
         "ip_reputation": alert.ip_reputation,
         "hash_reputation": alert.hash_reputation,
         "threat_score": alert.threat_score,
@@ -181,6 +235,8 @@ class AlertCreate(BaseModel):
     # Which detection-agent rule produced this (see rule_definitions in the
     # /detection-rules endpoint below). None for hand-submitted alerts.
     rule_key: str | None = None
+    # Which of our devices this is about (set by the Sysmon endpoint agent).
+    host: str | None = None
 
 
 @app.get("/")
@@ -189,9 +245,19 @@ def root():
 
 
 @app.post("/alerts")
-def create_alert(alert: AlertCreate):
-    db = SessionLocal()
+def create_alert(alert: AlertCreate, request: Request):
     alert_data = alert.dict()
+
+    # Alerts about one of our devices come from its endpoint agent: check the
+    # shared token (when one is configured) and drop them while that device's
+    # monitoring is switched off.
+    if alert_data.get("host"):
+        _require_agent_token(request)
+        paused = _monitoring_paused(alert_data["host"])
+        if paused:
+            return {"ignored": True, "reason": paused}
+
+    db = SessionLocal()
 
     # AI Classifier -> Risk Priority step of the pipeline: score the raw
     # alert and store the AI-assigned severity, regardless of whatever
@@ -220,6 +286,9 @@ def create_alert(alert: AlertCreate):
     # comes only from the AI classifier, and the MITRE technique from the
     # alert text -- neither is touched here.)
     anon_match = ip_blocklist.lookup(alert_data.get("ip"))
+    # Whether a listed IP is blocked automatically is a dashboard switch
+    # (IP Blocklist tab). Off = still detected, logged and geolocated, not blocked.
+    auto_block = _get_bool_setting(db, SETTING_VPN_AUTO_BLOCK, True) if anon_match else False
     if anon_match:
         enrichment = {
             **enrichment,
@@ -242,9 +311,11 @@ def create_alert(alert: AlertCreate):
     # are held as "pending_approval" until an analyst calls
     # POST /alerts/{id}/approve -- see response-engine/playbooks.py.
     playbook_key, playbook = decide_response(alert_data["severity"], enrichment)
-    if anon_match:
+    if anon_match and auto_block:
         # Block right away instead of queueing the block for approval.
         playbook = add_immediate_ip_block(playbook, anon_match)
+    elif anon_match:
+        playbook = detection_only_anonymizer(playbook)
     response_status, executed_steps, pending_steps = execute_response(
         playbook_key, playbook, {"ip": alert_data.get("ip"), "hash": alert_data.get("hash")}
     )
@@ -252,13 +323,21 @@ def create_alert(alert: AlertCreate):
     alert_data["response_playbook"] = response_steps_json(playbook)
     alert_data["response_status"] = response_status  # "auto_resolved" | "pending_approval"
 
+    # Show where the anonymizer's exit node is on the alert itself, so the
+    # country is visible in Alerts, not only on the map. (Cached; a failed
+    # lookup just leaves the description as it was.)
+    if anon_match and alert_data.get("rule_key") in ANONYMIZER_RULE_KEYS:
+        exit_geo = geolocate_ip(alert_data.get("ip"))
+        if exit_geo and exit_geo.get("country") and exit_geo["country"] != "Internal Network":
+            alert_data["description"] = f"{alert_data['description']} [exit node location: {exit_geo['country']}]"
+
     new_alert = models.Alert(**alert_data)
     db.add(new_alert)
     db.commit()
     db.refresh(new_alert)
     notify_if_critical(new_alert)
     log_audit(db, actor="system", action="Alert ingested", target=f"ALT-{new_alert.id}", source_ip=new_alert.ip)
-    if anon_match:
+    if anon_match and auto_block:
         log_audit(
             db,
             actor="system",
@@ -960,14 +1039,19 @@ def list_assets():
     db = SessionLocal()
     alerts = db.query(models.Alert).order_by(models.Alert.timestamp).all()
     managed = db.query(models.ManagedAsset).order_by(models.ManagedAsset.created_at).all()
+    agents = db.query(models.EndpointAgent).all()
+    monitoring_global = _get_bool_setting(db, SETTING_MONITORING_GLOBAL, True)
     db.close()
 
     severity_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
     by_source: dict[str, dict] = {}
     for a in alerts:
-        entry = by_source.setdefault(a.source, {
-            "hostname": a.source,
-            "ip": a.ip,
+        # An alert from an endpoint agent is about one of our devices (a.host);
+        # anything else is grouped by its source, as before.
+        entry = by_source.setdefault(a.host or a.source, {
+            "hostname": a.host or a.source,
+            # For host alerts a.ip is the *remote* address involved, not the device's own.
+            "ip": None if a.host else a.ip,
             "alert_count": 0,
             "active_incidents": 0,
             "max_severity": "Low",
@@ -978,7 +1062,8 @@ def list_assets():
             "managed": False,
         })
         entry["alert_count"] += 1
-        entry["ip"] = a.ip or entry["ip"]
+        if not a.host:
+            entry["ip"] = a.ip or entry["ip"]
         entry["last_seen"] = a.timestamp
         if a.response_status == "pending_approval":
             entry["active_incidents"] += 1
@@ -1005,10 +1090,33 @@ def list_assets():
         entry["managed"] = True
         entry["ip"] = entry["ip"] or m.lan_ip
 
+    # Devices running the Sysmon endpoint agent: a real heartbeat gives a
+    # real online/offline signal, and they appear even before any alert.
+    for ag in agents:
+        entry = by_source.setdefault(ag.hostname, {
+            "hostname": ag.hostname,
+            "ip": ag.ip,
+            "alert_count": 0,
+            "active_incidents": 0,
+            "max_severity": None,
+            "max_risk_score": 0,
+            "last_seen": ag.last_seen,
+            "owner": None,
+            "mac": None,
+            "managed": False,
+        })
+        entry["agent"] = ag
+        entry["owner"] = ag.owner or entry["owner"]
+        entry["ip"] = ag.ip or entry["ip"]
+        entry["last_seen"] = max(entry["last_seen"], ag.last_seen)
+
     now = datetime.utcnow()
     result = []
     for entry in by_source.values():
-        if entry["alert_count"] > 0:
+        agent = entry.get("agent")
+        if agent is not None:
+            status = "Online" if (now - agent.last_seen) <= AGENT_ONLINE_WINDOW else "Offline"
+        elif entry["alert_count"] > 0:
             status = "Online" if (now - entry["last_seen"]) <= timedelta(hours=1) else "Offline"
         else:
             status = "Registered"
@@ -1017,13 +1125,14 @@ def list_assets():
             "ip": entry["ip"],
             "mac_address": entry["mac"],
             "owner": entry["owner"],
-            "type": "Managed" if entry["managed"] else "From Alerts",
+            "type": "Endpoint Agent" if agent is not None else ("Managed" if entry["managed"] else "From Alerts"),
             "status": status,
             "risk_score": entry["max_risk_score"],
             "active_incidents": entry["active_incidents"],
             "max_severity": entry["max_severity"],
             "alert_count": entry["alert_count"],
             "last_seen": entry["last_seen"],
+            "monitoring": (agent.monitoring_enabled is not False and monitoring_global) if agent is not None else None,
         })
     result.sort(key=lambda r: r["last_seen"], reverse=True)
     return result
@@ -1176,7 +1285,321 @@ RULE_DEFINITIONS = [
         "description": "A request from an IP on the pre-loaded anonymizer blocklist (VPN, Tor exit node or open proxy) was refused on arrival. Switching this rule off only silences the alert; the target app keeps blocking.",
         "source": "Target-App",
     },
+    {
+        "key": "anonymizer_ip_detected",
+        "name": "VPN / Tor / Proxy Detected (not blocked)",
+        "description": "A visitor reached the target app from a VPN, Tor or proxy address while automatic blocking was switched off. Logged and geolocated, but allowed through.",
+        "source": "Target-App",
+    },
+    {
+        "key": "sysmon_suspicious_process",
+        "name": "Sysmon: Suspicious Process",
+        "description": "A process started on a connected device with an attacker-style command line: encoded or download-and-run PowerShell, certutil/bitsadmin downloads, mshta/regsvr32/rundll32 abuse, an Office app spawning a shell, Mimikatz or an LSASS memory dump.",
+        "source": "Sysmon",
+    },
+    {
+        "key": "sysmon_credential_dumping",
+        "name": "Sysmon: Credential Dumping",
+        "description": "An untrusted process opened the LSASS process with memory-read access rights, the signature of credential-dumping tools.",
+        "source": "Sysmon",
+    },
+    {
+        "key": "sysmon_autorun_persistence",
+        "name": "Sysmon: Autorun Persistence",
+        "description": "A Run/RunOnce registry key was set to launch something from a temp or user-writable folder or a script host, or an executable/script was dropped into the Startup folder.",
+        "source": "Sysmon",
+    },
+    {
+        "key": "sysmon_malicious_network",
+        "name": "Sysmon: Suspicious Connection",
+        "description": "A device connected out to an address on the VPN/Tor/proxy blocklist, or a script host or Office app made an outbound connection to a remote address.",
+        "source": "Sysmon",
+    },
+    {
+        "key": "sysmon_ransomware",
+        "name": "Sysmon: Ransomware Behaviour",
+        "description": "Many files created with ransomware extensions in a short time, or shadow-copy / recovery deletion commands (vssadmin, wbadmin, bcdedit) that ransomware runs before encrypting.",
+        "source": "Sysmon",
+    },
+    {
+        "key": "sysmon_policy_violation",
+        "name": "Sysmon: Acceptable-Use Policy",
+        "description": "A device spent more than its daily allowance on a category such as streaming video, social media or games. The alert recommends an action (policy reminder, manager notice, device review).",
+        "source": "Sysmon",
+    },
+    {
+        "key": "sysmon_malicious_website",
+        "name": "Sysmon: Malicious Website Visited",
+        "description": "A device looked up a domain on the malicious-sites list (known malware, phishing or exploit hosts).",
+        "source": "Sysmon",
+    },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Connected endpoints (Sysmon agent -- see endpoint-agent/)
+#
+# The agent runs on each protected device. It registers itself and sends a
+# heartbeat every ~10s (POST /agents/heartbeat), streams the Sysmon events it
+# read (POST /agents/events) for the per-device activity feed, and posts
+# anything suspicious as a normal alert via POST /alerts with `host` set.
+# ---------------------------------------------------------------------------
+
+AGENT_ONLINE_WINDOW = timedelta(seconds=30)   # three missed heartbeats = offline
+MAX_EVENTS_PER_HOST = 20000                   # ordinary activity kept per device (about 3 days of normal use)
+MAX_EVENTS_PER_POST = 500
+MAX_FLAGGED_PER_HOST = 2000                   # events that raised an alert are kept longer than ordinary ones
+EVENT_RETENTION_DAYS = {False: 3, True: 7}    # ordinary / alert events older than this are removed
+
+
+class AgentHeartbeat(BaseModel):
+    hostname: str
+    ip: str | None = None
+    os: str | None = None
+    agent_version: str | None = None
+    sysmon_status: str | None = None
+    owner: str | None = None
+    # Today's time per activity category, from the agent's policy tracker.
+    usage: dict | None = None
+
+
+class AgentEvent(BaseModel):
+    timestamp: datetime | None = None
+    event_id: int | None = None
+    event_type: str
+    summary: str
+    flagged: bool = False
+
+
+class AgentEventBatch(BaseModel):
+    hostname: str
+    events: list[AgentEvent]
+
+
+def _naive_utc(dt: datetime | None) -> datetime:
+    """Stores everything as naive UTC, like the rest of this backend."""
+    if dt is None:
+        return datetime.utcnow()
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+@app.post("/agents/heartbeat")
+def agent_heartbeat(hb: AgentHeartbeat, request: Request):
+    _require_agent_token(request)
+    hostname = hb.hostname.strip()[:100]
+    if not hostname:
+        raise HTTPException(status_code=422, detail="hostname is required")
+    db = SessionLocal()
+    now = datetime.utcnow()
+    row = db.query(models.EndpointAgent).filter(models.EndpointAgent.hostname == hostname).first()
+    first_time = row is None
+    if row is None:
+        row = models.EndpointAgent(hostname=hostname, first_seen=now, last_seen=now, events_total=0, monitoring_enabled=True)
+        db.add(row)
+    row.last_seen = now
+    row.ip = hb.ip or row.ip
+    row.os = hb.os or row.os
+    row.agent_version = hb.agent_version or row.agent_version
+    row.sysmon_status = hb.sysmon_status or row.sysmon_status
+    if hb.owner:
+        row.owner = hb.owner.strip()[:100]
+    if hb.usage is not None:
+        try:
+            usage_text = json.dumps(hb.usage)
+            if len(usage_text) <= 4000:
+                row.usage_json = usage_text
+        except (TypeError, ValueError):
+            pass
+    db.commit()
+    if first_time:
+        log_audit(db, actor="system", action="Endpoint agent connected", target=hostname, source_ip=hb.ip)
+    global_on = _get_bool_setting(db, SETTING_MONITORING_GLOBAL, True)
+    device_on = row.monitoring_enabled is not False
+    db.close()
+    # The agent obeys this: while False it stops reading Sysmon and sends nothing.
+    return {"ok": True, "hostname": hostname, "monitoring": global_on and device_on,
+            "global_monitoring": global_on, "device_monitoring": device_on}
+
+
+@app.post("/agents/events")
+def agent_events(batch: AgentEventBatch, request: Request):
+    _require_agent_token(request)
+    hostname = batch.hostname.strip()[:100]
+    events = batch.events[:MAX_EVENTS_PER_POST]
+    paused = _monitoring_paused(hostname)
+    if paused:
+        return {"accepted": 0, "paused": True, "reason": paused}
+    db = SessionLocal()
+    row = db.query(models.EndpointAgent).filter(models.EndpointAgent.hostname == hostname).first()
+    if row is None:
+        db.close()
+        raise HTTPException(status_code=404, detail=f"Unknown device '{hostname}': send a heartbeat first")
+    for ev in events:
+        db.add(models.EndpointEvent(
+            hostname=hostname,
+            timestamp=_naive_utc(ev.timestamp),
+            event_id=ev.event_id,
+            event_type=ev.event_type[:40],
+            summary=ev.summary[:400],
+            flagged=ev.flagged,
+        ))
+    row.events_total = (row.events_total or 0) + len(events)
+    db.commit()
+
+    # Keep only the newest MAX_EVENTS_PER_HOST ordinary events for this device. Events that raised an
+    # alert are kept longer (up to MAX_FLAGGED_PER_HOST), so they do not scroll away behind the noise.
+    for flagged, keep in ((False, MAX_EVENTS_PER_HOST), (True, MAX_FLAGGED_PER_HOST)):
+        db.query(models.EndpointEvent).filter(
+            models.EndpointEvent.hostname == hostname,
+            models.EndpointEvent.flagged == flagged,
+            models.EndpointEvent.timestamp < datetime.utcnow() - timedelta(days=EVENT_RETENTION_DAYS[flagged]),
+        ).delete(synchronize_session=False)
+        db.commit()
+        cutoff = (
+            db.query(models.EndpointEvent.id)
+            .filter(models.EndpointEvent.hostname == hostname, models.EndpointEvent.flagged == flagged)
+            .order_by(models.EndpointEvent.id.desc())
+            .offset(keep)
+            .first()
+        )
+        if cutoff is not None:
+            db.query(models.EndpointEvent).filter(
+                models.EndpointEvent.hostname == hostname,
+                models.EndpointEvent.flagged == flagged,
+                models.EndpointEvent.id <= cutoff[0],
+            ).delete(synchronize_session=False)
+            db.commit()
+    db.close()
+    return {"accepted": len(events)}
+
+
+@app.get("/agents")
+def list_agents():
+    """Every connected device with live status, event count and how many alerts are about it."""
+    db = SessionLocal()
+    agents = db.query(models.EndpointAgent).order_by(models.EndpointAgent.hostname).all()
+    alert_counts = dict(
+        db.query(models.Alert.host, func.count(models.Alert.id))
+        .filter(models.Alert.host.isnot(None))
+        .group_by(models.Alert.host)
+        .all()
+    )
+    global_on = _get_bool_setting(db, SETTING_MONITORING_GLOBAL, True)
+    db.close()
+    now = datetime.utcnow()
+
+    def parse_usage(text):
+        try:
+            return json.loads(text) if text else None
+        except ValueError:
+            return None
+
+    return [
+        {
+            "hostname": a.hostname,
+            "ip": a.ip,
+            "os": a.os,
+            "agent_version": a.agent_version,
+            "sysmon_status": a.sysmon_status,
+            "online": (now - a.last_seen) <= AGENT_ONLINE_WINDOW,
+            "first_seen": a.first_seen,
+            "last_seen": a.last_seen,
+            "events_total": a.events_total or 0,
+            "alert_count": alert_counts.get(a.hostname, 0),
+            "owner": a.owner,
+            "monitoring_enabled": a.monitoring_enabled is not False,
+            "monitoring_active": global_on and a.monitoring_enabled is not False,
+            "usage": parse_usage(a.usage_json),
+        }
+        for a in agents
+    ]
+
+
+class MonitoringSwitch(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/monitoring")
+def get_monitoring_setting():
+    """The master switch: is endpoint monitoring on for all devices?"""
+    db = SessionLocal()
+    value = _get_bool_setting(db, SETTING_MONITORING_GLOBAL, True)
+    db.close()
+    return {"enabled": value}
+
+
+@app.post("/settings/monitoring")
+def set_monitoring_setting(body: MonitoringSwitch):
+    db = SessionLocal()
+    _set_bool_setting(db, SETTING_MONITORING_GLOBAL, body.enabled)
+    log_audit(db, actor="admin", action=f"Endpoint monitoring switched {'ON' if body.enabled else 'OFF'} for all devices", target="all devices")
+    db.close()
+    return {"enabled": body.enabled}
+
+
+@app.post("/agents/{hostname}/monitoring")
+def set_device_monitoring(hostname: str, body: MonitoringSwitch):
+    """Switch monitoring on or off for a single device."""
+    db = SessionLocal()
+    row = db.query(models.EndpointAgent).filter(models.EndpointAgent.hostname == hostname).first()
+    if row is None:
+        db.close()
+        raise HTTPException(status_code=404, detail=f"Unknown device '{hostname}'")
+    row.monitoring_enabled = body.enabled
+    db.commit()
+    log_audit(db, actor="admin", action=f"Endpoint monitoring switched {'ON' if body.enabled else 'OFF'}", target=hostname)
+    db.close()
+    return {"hostname": hostname, "enabled": body.enabled}
+
+
+@app.get("/agents/{hostname}/events")
+def agent_recent_events(hostname: str, limit: int = 100, flagged: bool = False, days: float | None = None):
+    """The device's activity feed, newest first. flagged=true returns only events that raised an alert;
+    days=1 or days=3 limits it to that many days back."""
+    limit = max(1, min(limit, 500))
+    db = SessionLocal()
+    if flagged:
+        # "Alerts only" reads the alerts table itself, which is never trimmed, so older alerts stay
+        # available however much ordinary activity has come in since.
+        alert_query = db.query(models.Alert).filter(models.Alert.host == hostname)
+        if days is not None and days > 0:
+            alert_query = alert_query.filter(models.Alert.timestamp >= datetime.utcnow() - timedelta(days=min(days, 30)))
+        alerts = alert_query.order_by(models.Alert.timestamp.desc()).limit(limit).all()
+        db.close()
+        return [
+            {
+                "id": -a.id,   # negative, so it can never clash with an activity row id
+                "timestamp": a.timestamp,
+                "event_id": None,
+                "event_type": "Alert",
+                "summary": f"{a.severity} \u00b7 {a.description}",
+                "flagged": True,
+            }
+            for a in alerts
+        ]
+    query = db.query(models.EndpointEvent).filter(models.EndpointEvent.hostname == hostname)
+    if days is not None and days > 0:
+        query = query.filter(models.EndpointEvent.timestamp >= datetime.utcnow() - timedelta(days=min(days, 30)))
+    rows = (
+        query
+        .order_by(models.EndpointEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+    db.close()
+    return [
+        {
+            "id": r.id,
+            "timestamp": r.timestamp,
+            "event_id": r.event_id,
+            "event_type": r.event_type,
+            "summary": r.summary,
+            "flagged": r.flagged,
+        }
+        for r in rows
+    ]
 
 
 @app.get("/blocklist")
@@ -1196,6 +1619,158 @@ def get_blocklist():
 def check_blocklist(ip: str):
     """Is this IP on the anonymizer blocklist? Returns the matching entry, or null."""
     return {"ip": ip, "match": ip_blocklist.lookup(ip)}
+
+
+class VpnBlockSwitch(BaseModel):
+    enabled: bool
+
+
+class CustomBlockEntry(BaseModel):
+    entry: str
+    category: str = "vpn"
+    label: str = ""
+
+
+@app.get("/settings/vpn-block")
+def get_vpn_block_setting():
+    """Is automatic VPN / Tor / proxy blocking on? (default: yes)"""
+    db = SessionLocal()
+    value = _get_bool_setting(db, SETTING_VPN_AUTO_BLOCK, True)
+    db.close()
+    return {"enabled": value, "auto_block": value}
+
+
+@app.post("/settings/vpn-block")
+def set_vpn_block_setting(body: VpnBlockSwitch):
+    """
+    Turns automatic blocking on or off. The target app is told within a few
+    seconds by the detection watcher (see detection-agent/target_sync.py).
+    Off = VPN/Tor visitors are still detected, logged and geolocated, but are
+    allowed through.
+    """
+    db = SessionLocal()
+    _set_bool_setting(db, SETTING_VPN_AUTO_BLOCK, body.enabled)
+    log_audit(db, actor="admin", action=f"Automatic VPN/Tor blocking switched {'ON' if body.enabled else 'OFF'}", target="target-app")
+    db.close()
+    return {"enabled": body.enabled, "auto_block": body.enabled}
+
+
+@app.get("/target-config")
+def get_target_config():
+    """What the target app should be running with. Polled by detection-agent/target_sync.py."""
+    db = SessionLocal()
+    auto_block = _get_bool_setting(db, SETTING_VPN_AUTO_BLOCK, True)
+    db.close()
+    return {"auto_block": auto_block, "blocklist_sha": ip_blocklist.export_text()[1]}
+
+
+@app.get("/blocklist/export")
+def export_blocklist():
+    """The whole merged blocklist as list-file text, for keeping a separately hosted target app in sync."""
+    text, sha = ip_blocklist.export_text()
+    return {"sha": sha, "text": text}
+
+
+@app.get("/blocklist/custom")
+def get_custom_blocklist():
+    return ip_blocklist.list_custom_entries()
+
+
+@app.post("/blocklist/custom")
+def add_custom_blocklist_entry(body: CustomBlockEntry):
+    """Adds an IP or range (for example the address your VPN shows) to the blocklist. Takes effect within seconds."""
+    row, reason = ip_blocklist.add_custom_entry(body.entry, body.category, body.label)
+    if row is None:
+        raise HTTPException(status_code=422, detail=reason)
+    db = SessionLocal()
+    log_audit(db, actor="admin", action=f"Added to blocklist: {row['entry']} ({row['category'].upper()} - {row['label']})", target="blocklist")
+    db.close()
+    return row
+
+
+@app.delete("/blocklist/custom")
+def remove_custom_blocklist_entry(entry: str):
+    if not ip_blocklist.remove_custom_entry(entry):
+        raise HTTPException(status_code=404, detail="That entry is not in the dashboard-managed list")
+    db = SessionLocal()
+    log_audit(db, actor="admin", action=f"Removed from blocklist: {entry}", target="blocklist")
+    db.close()
+    return {"removed": entry}
+
+
+@app.get("/vpn-activity")
+def vpn_activity(limit: int = 100):
+    """
+    Every time someone reached the target app from a VPN, Tor or proxy address:
+    when, which address, which provider, which country, and whether it was
+    blocked or only detected (automatic blocking off). Built from the
+    anonymizer alerts, with the country looked up live (cached).
+    """
+    limit = max(1, min(limit, 300))
+    db = SessionLocal()
+    rows = (
+        db.query(models.Alert)
+        .filter(models.Alert.rule_key.in_(list(ANONYMIZER_RULE_KEYS)))
+        .order_by(models.Alert.id.desc())
+        .limit(limit)
+        .all()
+    )
+    auto_block = _get_bool_setting(db, SETTING_VPN_AUTO_BLOCK, True)
+    db.close()
+
+    out = []
+    for a in rows:
+        match = ip_blocklist.lookup(a.ip)
+        geo = geolocate_ip(a.ip)
+        country = geo.get("country") if geo else None
+        out.append({
+            "id": a.id,
+            "timestamp": a.timestamp,
+            "ip": a.ip,
+            "category": match["category"] if match else None,
+            "provider": match["label"] if match else None,
+            "country": country,
+            "action": "Blocked" if a.rule_key == "anonymizer_ip_block" else "Detected (allowed)",
+            "severity": a.severity,
+            "alert_id": a.id,
+            "description": a.description,
+        })
+    return {"auto_block": auto_block, "total": len(out), "rows": out}
+
+
+@app.get("/ransomware/status")
+def ransomware_status():
+    """
+    Ransomware incidents (file-store encryption on the target app, or an
+    endpoint reporting encrypted files) for the dashboard's live banner/panel.
+    "active" means one was raised in the last 15 minutes.
+    """
+    db = SessionLocal()
+    rows = (
+        db.query(models.Alert)
+        .filter(models.Alert.rule_key.in_(list(RANSOMWARE_RULE_KEYS)))
+        .order_by(models.Alert.id.desc())
+        .limit(20)
+        .all()
+    )
+    db.close()
+    now = datetime.utcnow()
+    incidents = [
+        {
+            "alert_id": a.id,
+            "timestamp": a.timestamp,
+            "source": a.host or a.source,
+            "severity": a.severity,
+            "description": a.description,
+            "risk_score": a.risk_score,
+            "response_action": a.response_action,
+            "response_status": a.response_status,
+            "mitre_technique": a.mitre_technique,
+        }
+        for a in rows
+    ]
+    active = any(_naive_utc(a.timestamp) >= now - RANSOMWARE_ACTIVE_WINDOW for a in rows)
+    return {"active": active, "total": len(incidents), "incidents": incidents}
 
 
 @app.get("/detection-rules")

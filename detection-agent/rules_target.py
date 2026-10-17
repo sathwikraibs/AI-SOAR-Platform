@@ -36,6 +36,7 @@ RULE_KEY_PATH_TRAVERSAL = "path_traversal"
 RULE_KEY_SUSPICIOUS_FILE_UPLOAD = "suspicious_file_upload"
 RULE_KEY_MULTI_STAGE_CORRELATION = "multi_stage_correlation"
 RULE_KEY_ANONYMIZER_BLOCK = "anonymizer_ip_block"
+RULE_KEY_ANONYMIZER_DETECTED = "anonymizer_ip_detected"
 
 TARGET_APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target-app")
 ACCESS_LOG_PATH = os.path.join(TARGET_APP_DIR, "logs", "access.log")
@@ -288,6 +289,31 @@ def process_new_lines(new_lines: list[str]) -> list[dict]:
                         "ip": ip,
                         "hash": None,
                         "rule_key": RULE_KEY_ANONYMIZER_BLOCK,
+                    }
+                )
+
+        elif event == "ANONYMIZER_ALLOWED":
+            # Same visitor as ANONYMIZER_BLOCKED, but automatic VPN/Tor blocking is
+            # switched off in the dashboard, so the app let them through. They are
+            # still recorded (with the exit-node country, added by the backend) so an
+            # analyst can see who is hiding behind a VPN, Tor or proxy.
+            allowed_key = f"allowed:{ip}"
+            if is_enabled(RULE_KEY_ANONYMIZER_DETECTED) and now - _anon_alerted_at.get(allowed_key, 0.0) >= ANON_ALERT_COOLDOWN_SECONDS:
+                _anon_alerted_at[allowed_key] = now
+                category = fields.get("category", "unknown").upper()
+                label = fields.get("label", "unlabelled").replace("_", " ")
+                findings.append(
+                    {
+                        "source": "Target-App",
+                        "description": (
+                            f"Connection from an anonymizing network detected but not blocked (automatic VPN/Tor "
+                            f"blocking is off): {ip} is on the {category} blocklist ({label}) and reached "
+                            f"{fields.get('path', '/')} -- the visitor is hiding their real identity behind a "
+                            f"VPN, Tor or proxy"
+                        ),
+                        "ip": ip,
+                        "hash": None,
+                        "rule_key": RULE_KEY_ANONYMIZER_DETECTED,
                     }
                 )
 

@@ -72,6 +72,13 @@ class Alert(Base):
     # real per-rule trigger counts.
     rule_key = Column(String, nullable=True)
 
+    # Which device the alert is about, when it came from an endpoint agent
+    # (e.g. the Sysmon agent sends its machine name). Null for alerts that
+    # aren't tied to one of our devices. For these alerts `ip` is the
+    # *remote* address involved (e.g. where a process connected to), not
+    # the device's own address.
+    host = Column(String, nullable=True)
+
     # Day 3 (Nanda) -- threat-intelligence enrichment
     ip_reputation = Column(String, nullable=True)      # "Clean" | "Suspicious" | "Malicious" | "Unknown"
     hash_reputation = Column(String, nullable=True)     # "Clean" | "Suspicious" | "Malicious" | "Unknown"
@@ -165,3 +172,65 @@ class ManagedAsset(Base):
     department = Column(String, nullable=True)
     notes = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=False)
+
+
+class EndpointAgent(Base):
+    """
+    One row per device running the Sysmon endpoint agent (endpoint-agent/).
+    The agent registers itself and refreshes last_seen with a heartbeat every
+    ~10 seconds, so "online" is a real liveness signal: a device is online if
+    its last heartbeat was recent. Backs the connected-devices panel on the
+    dashboard's Assets tab.
+    """
+    __tablename__ = "endpoint_agents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    hostname = Column(String, nullable=False, unique=True, index=True)
+    ip = Column(String, nullable=True)
+    os = Column(String, nullable=True)
+    agent_version = Column(String, nullable=True)
+    sysmon_status = Column(String, nullable=True)   # "running" | "not detected" | "simulated"
+    first_seen = Column(DateTime, nullable=False)
+    last_seen = Column(DateTime, nullable=False)
+    events_total = Column(Integer, nullable=False, default=0)
+    # Whose device this is (set with --owner when the agent starts).
+    owner = Column(String, nullable=True)
+    # Per-device monitoring switch, controlled from the dashboard's Assets tab.
+    # While False the backend ignores this device's events and alerts, and the
+    # agent stops reading Sysmon (it keeps sending heartbeats so it still shows
+    # as connected). Defaults to on.
+    monitoring_enabled = Column(Boolean, nullable=False, default=True)
+    # Today's time per activity category as last reported by the agent's
+    # heartbeat (JSON text), e.g. {"date": "...", "categories": {...}}.
+    usage_json = Column(String, nullable=True)
+
+
+class EndpointEvent(Base):
+    """
+    One row per Sysmon event an agent reported (process started, network
+    connection, file created, ...), newest kept, oldest pruned. This is the
+    per-device activity feed; only the suspicious ones also become alerts
+    (flagged=True marks those).
+    """
+    __tablename__ = "endpoint_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    hostname = Column(String, nullable=False, index=True)
+    timestamp = Column(DateTime, nullable=False)
+    event_id = Column(Integer, nullable=True)       # Sysmon event ID, e.g. 1 = process created
+    event_type = Column(String, nullable=False)     # "Process", "Network", "File", "Registry", ...
+    summary = Column(String, nullable=False)
+    flagged = Column(Boolean, nullable=False, default=False)
+
+
+class AppSetting(Base):
+    """
+    Small key/value store for switches that are controlled from the dashboard,
+    for example "vpn_auto_block" and "monitoring_global" (see backend/main.py).
+    A missing key means "use the default", so existing databases need nothing.
+    """
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+    updated_at = Column(DateTime, nullable=False)

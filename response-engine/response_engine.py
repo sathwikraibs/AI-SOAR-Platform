@@ -27,6 +27,12 @@ _CREDENTIAL_TECHNIQUES = {"T1110", "T1078"}
 _RECON_TECHNIQUES = {"T1595"}
 _MALWARE_TECHNIQUES = {"T1486", "T1204"}
 _WEB_ATTACK_TECHNIQUES = {"T1190"}
+# Endpoint (Sysmon agent) acceptable-use findings. "POLICY-AUP" is not a MITRE
+# technique: it labels a policy breach (too long on streaming / social media
+# during work hours), which is not an attack. T1189 is a visit to a known
+# malicious website.
+_POLICY_TECHNIQUES = {"POLICY-AUP"}
+_MALICIOUS_SITE_TECHNIQUES = {"T1189"}
 
 # Weight given to the AI classifier's severity label when computing the
 # composite risk score below (0-100 scale, same as threat_score).
@@ -85,6 +91,10 @@ def decide_response(severity: str, enrichment: dict):
         playbook_key = "network_recon"
     elif technique_id in _WEB_ATTACK_TECHNIQUES:
         playbook_key = "web_attack_response"
+    elif technique_id in _POLICY_TECHNIQUES:
+        playbook_key = "policy_violation"
+    elif technique_id in _MALICIOUS_SITE_TECHNIQUES:
+        playbook_key = "endpoint_malicious_site"
     elif severity in ("High", "Medium"):
         playbook_key = "standard_triage"
     else:
@@ -129,6 +139,22 @@ def add_immediate_ip_block(playbook: dict, match: dict) -> dict:
     deny_step = {"action": "Add IP to the permanent deny list (identity-masking network)", "auto": True}
     kept = [s for s in playbook["steps"] if s["auto"] or not _is_source_ip_block_step(s["action"])]
     return {**playbook, "steps": [block_step, deny_step] + kept}
+
+
+def detection_only_anonymizer(playbook: dict) -> dict:
+    """
+    Counterpart of add_immediate_ip_block() for when automatic VPN/Tor blocking
+    is switched OFF: the alert from a listed IP is still raised, logged and
+    geolocated, but the IP is not blocked. A block step is offered for an
+    analyst to approve instead, unless the playbook already has one.
+    """
+    only_monitoring = all(s["action"].lower().startswith("no automated action") for s in playbook["steps"])
+    if only_monitoring:
+        return PLAYBOOKS["anonymizer_detected"]
+    if any(_is_source_ip_block_step(s["action"]) for s in playbook["steps"]):
+        return playbook
+    pending = {"action": "Block source IP -- awaiting approval (automatic VPN/Tor blocking is switched off)", "auto": False}
+    return {**playbook, "steps": list(playbook["steps"]) + [pending]}
 
 
 def execute_response(playbook_key: str, playbook: dict, alert_context: dict | None = None):

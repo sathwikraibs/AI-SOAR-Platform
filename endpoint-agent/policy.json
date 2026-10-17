@@ -1,0 +1,62 @@
+{
+  "categories": {
+    "streaming": {
+      "label": "Streaming video",
+      "limit_minutes": 30,
+      "domains": [
+        "youtube.com",
+        "youtu.be",
+        "googlevideo.com",
+        "ytimg.com",
+        "netflix.com",
+        "nflxvideo.net",
+        "primevideo.com",
+        "hotstar.com",
+        "twitch.tv",
+        "disneyplus.com"
+      ]
+    },
+    "social": {
+      "label": "Social media",
+      "limit_minutes": 30,
+      "domains": [
+        "facebook.com",
+        "fbcdn.net",
+        "instagram.com",
+        "cdninstagram.com",
+        "twitter.com",
+        "x.com",
+        "tiktok.com",
+        "snapchat.com",
+        "reddit.com",
+        "redd.it"
+      ]
+    },
+    "games": {
+      "label": "Games",
+      "limit_minutes": 20,
+      "domains": [
+        "steampowered.com",
+        "steamcontent.com",
+        "epicgames.com",
+        "roblox.com",
+        "riotgames.com"
+      ]
+    }
+  },
+  "forbidden_programs": {
+    "label": "VPN / Tor client",
+    "programs": [
+      "protonvpn.exe",
+      "protonvpn.client.exe",
+      "openvpn.exe",
+      "openvpn-gui.exe",
+      "wireguard.exe",
+      "nordvpn.exe",
+      "expressvpn.exe",
+      "windscribe.exe",
+      "tor.exe",
+      "psiphon3.exe"
+    ]
+  }
+}

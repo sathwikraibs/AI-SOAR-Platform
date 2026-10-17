@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps'
 import world from 'world-atlas/countries-110m.json'
 import {
@@ -25,7 +25,7 @@ async function fetchJSON<T>(path: string): Promise<T> {
 }
 
 type Severity = 'Critical' | 'High' | 'Medium' | 'Low'
-type Alert = { id:string; rawId:number; severity:Severity; time:string; ts:number; detection:string; source:string; asset:string; technique:string; score:number; status:string }
+type Alert = { id:string; rawId:number; severity:Severity; time:string; ts:number; detection:string; source:string; asset:string; technique:string; score:number; status:string; internal?:boolean }
 
 // Every stage of the pipeline (detection-agent's watcher*.py) stamps
 // events with datetime.now(timezone.utc), but by the time a timestamp has
@@ -147,7 +147,7 @@ function toLocalDateTime(iso: string | null | undefined): string {
 
 // Shape returned by GET /alerts and GET /alerts/{id} on the real backend
 // (database/models.py's Alert row, serialized as-is by FastAPI).
-type ApiAlert = { id:number; source:string; description:string; severity:string; ip:string|null; hash?:string|null; timestamp:string; ip_reputation?:string|null; hash_reputation?:string|null; threat_score?:number|null; mitre_technique?:string|null; risk_score?:number|null; response_action?:string|null; response_status?:string|null }
+type ApiAlert = { id:number; host?:string|null; source:string; description:string; severity:string; ip:string|null; hash?:string|null; timestamp:string; ip_reputation?:string|null; hash_reputation?:string|null; threat_score?:number|null; mitre_technique?:string|null; risk_score?:number|null; response_action?:string|null; response_status?:string|null }
 function mapAlert(a: ApiAlert): Alert {
   return {
     id: `ALT-${a.id}`,
@@ -157,11 +157,25 @@ function mapAlert(a: ApiAlert): Alert {
     ts: parseApiTimestamp(a.timestamp),
     detection: a.description,
     source: a.ip || a.source,
-    asset: a.source,
+    asset: a.host || a.source,
     technique: a.mitre_technique || '—',
     score: a.risk_score ?? 0,
     status: a.response_status || 'pending_approval',
+    // Internal = about one of our own devices (reported by the endpoint agent); everything else is External.
+    internal: !!a.host || a.source==='Sysmon',
   }
+}
+
+type Scope = 'internal'|'external'
+const inScope = (a:Alert, scope:Scope) => !!a.internal === (scope==='internal')
+// Newest first, so a fresh alert shows at the top of every list instead of the bottom.
+const newestFirst = (list:Alert[]) => [...list].sort((x,y)=>((y.ts||0)-(x.ts||0)) || (y.rawId-x.rawId))
+
+function ScopeTabs({ value, onChange, internal, external }: { value:Scope; onChange:(s:Scope)=>void; internal:number; external:number }) {
+  return <div className="scope-tabs" role="tablist">
+    {([['internal','Internal',internal],['external','External',external]] as const).map(([key,label,n])=>
+      <button key={key} role="tab" aria-selected={value===key} className={value===key?'selected':''} onClick={()=>onChange(key)}>{label}<b>{n}</b></button>)}
+  </div>
 }
 
 // Fixed reference point for the fallback data below -- deliberately NOT
@@ -214,7 +228,7 @@ function formatReportTimestamp(raw: string): string {
 
 function ApiNotice({ show }: { show:boolean }) { return show ? <p className="muted" style={{margin:'0 0 16px'}}>Can't reach the backend at {API_BASE} right now — showing example data.</p> : null }
 const nav = [
-  ['COMMAND','Overview',LayoutDashboard],['MONITOR','Alerts',AlertTriangle],['MONITOR','Incidents',ShieldAlert],['MONITOR','Investigations',Crosshair],['AUTOMATE','Playbooks',Play],['AUTOMATE','Runbook',BookOpen],['INTELLIGENCE','Threat Intelligence',Database],['INTELLIGENCE','Global Threat Map',Globe2],['INTELLIGENCE','IP Blocklist',ShieldAlert],['OPERATIONS','Assets',Server],['OPERATIONS','Response Center',Zap],['OPERATIONS','SSH / Sessions',Terminal],['SYSTEM','Audit',FileClock],['SYSTEM','Reports',FileText],['SYSTEM','24-Hour Report',Clock3],['SYSTEM','Detection Rules',SlidersHorizontal],['SYSTEM','Integrations',Network],['SYSTEM','Admin Panel',LockKeyhole],['SYSTEM','Settings',Settings],
+  ['COMMAND','Overview',LayoutDashboard],['MONITOR','Alerts',AlertTriangle],['MONITOR','Incidents',ShieldAlert],['MONITOR','Ransomware',KeyRound],['MONITOR','Investigations',Crosshair],['AUTOMATE','Playbooks',Play],['AUTOMATE','Runbook',BookOpen],['INTELLIGENCE','Threat Intelligence',Database],['INTELLIGENCE','Global Threat Map',Globe2],['INTELLIGENCE','IP Blocklist',ShieldAlert],['OPERATIONS','Assets',Server],['OPERATIONS','Response Center',Zap],['OPERATIONS','SSH / Sessions',Terminal],['SYSTEM','Audit',FileClock],['SYSTEM','Reports',FileText],['SYSTEM','24-Hour Report',Clock3],['SYSTEM','Detection Rules',SlidersHorizontal],['SYSTEM','Integrations',Network],['SYSTEM','Admin Panel',LockKeyhole],['SYSTEM','Settings',Settings],
 ]
 
 function SeverityBadge({ severity }: { severity: string }) { const c = COLORS[severity.toLowerCase() as keyof typeof COLORS] || COLORS.info; return <span className="badge" style={{color:c, borderColor:`${c}55`, background:`${c}12`}}><span className="severity-dot" style={{background:c}} />{severity}</span> }
@@ -326,9 +340,10 @@ function Overview({ onSelect, refreshKey, onNavigate, bumpRefresh }: {onSelect:(
   const [range,setRange]=useState('Last 24 Hours')
   const [chartTab,setChartTab]=useState<'Alerts'|'Incidents'|'Actions'>('Alerts')
   const [showCreate,setShowCreate]=useState(false)
+  const [feedScope,setFeedScope]=useState<Scope>('external')
   useEffect(()=>{
     let cancelled=false
-    fetchJSON<ApiAlert[]>('/alerts').then(data=>{ if(!cancelled) setAlerts(data.map(mapAlert)) }).catch(()=>{ if(!cancelled){ setApiError(true); setAlerts(mockAlerts) } })
+    fetchJSON<ApiAlert[]>('/alerts').then(data=>{ if(!cancelled) setAlerts(newestFirst(data.map(mapAlert))) }).catch(()=>{ if(!cancelled){ setApiError(true); setAlerts(mockAlerts) } })
     fetchJSON<ApiIncident[]>('/incidents').then(data=>{ if(!cancelled) setIncidents(data) }).catch(()=>{ if(!cancelled) setIncidents(null) })
     return ()=>{ cancelled=true }
   },[refreshKey])
@@ -374,7 +389,7 @@ function Overview({ onSelect, refreshKey, onNavigate, bumpRefresh }: {onSelect:(
   <div className="kpi-grid"><Kpi label="Active incidents" value={incidents!=null?String(incidentsInRange.length).padStart(2,'0'):'—'} change="live" color={COLORS.critical}/><Kpi label="Critical alerts" value={String(criticalCount).padStart(2,'0')} change="live" color={COLORS.critical}/><Kpi label="High alerts" value={String(highCount).padStart(2,'0')} change="live" color={COLORS.high}/><Kpi label="Resolved" value={String(resolvedCount).padStart(2,'0')} change="live" color={COLORS.success}/><Kpi label="Avg risk score" value={avgRisk} change="live" color={COLORS.medium}/></div>
   <div className="overview-grid"><Panel title="Threat activity" action="View alerts" onAction={()=>onNavigate('Alerts')} className="activity-panel"><div className="legend"><span><i style={{background:COLORS.critical}}/>Critical</span><span><i style={{background:COLORS.high}}/>High</span><span><i style={{background:COLORS.medium}}/>Medium</span><span><i style={{background:COLORS.low}}/>Low</span><div className="segmented">{(['Alerts','Incidents','Actions'] as const).map(t=><button key={t} className={chartTab===t?'selected':''} onClick={()=>setChartTab(t)}>{t}</button>)}</div></div><ThreatChart {...chartData}/></Panel><Panel title="Current security posture"><div className="posture"><div className="donut"><div><strong>{list.length}</strong><span>tracked alerts</span></div></div><div className="posture-list"><div><span><i style={{background:COLORS.critical}}/>Critical</span><b>{String(bySeverity('Critical')).padStart(2,'0')}</b></div><div><span><i style={{background:COLORS.high}}/>High</span><b>{String(bySeverity('High')).padStart(2,'0')}</b></div><div><span><i style={{background:COLORS.medium}}/>Medium</span><b>{String(bySeverity('Medium')).padStart(2,'0')}</b></div><div><span><i style={{background:COLORS.low}}/>Low</span><b>{String(bySeverity('Low')).padStart(2,'0')}</b></div></div></div><div className="response-mini"><span>Response status</span>{(['pending_approval','auto_resolved','approved_and_executed','rejected'] as const).filter(s=>byStatus(s)>0).map(s=><span key={s} style={{display:'inline-flex',alignItems:'center',gap:5}}><StatusBadge status={s}/><b style={{fontSize:11}}>{byStatus(s)}</b></span>)}{list.length===0 && <span className="muted" style={{fontSize:11}}>No alerts in range</span>}</div></Panel></div>
   <div className="lower-grid"><Panel title="Top attack types"><div className="bars">{attackTypeCounts.length===0 ? <p className="muted" style={{padding:'8px 0'}}>No alerts in this time range.</p> : attackTypeCounts.map(([name,count],i)=><div className="bar-row" key={name}><span>{name}</span><div><i style={{width:`${Math.round(count/maxAttackCount*100)}%`,background:attackTypeColors[i%attackTypeColors.length]}}/></div><b>{count}</b></div>)}</div></Panel><Panel title="Response status"><div className="bars response-bars">{[['auto_resolved',COLORS.success],['pending_approval',COLORS.pending],['approved_and_executed','#2dd4bf'],['rejected',COLORS.critical]].map(([n,c])=>{const count=byStatus(n as string);const pct=list.length?Math.round(count/list.length*100):0;return <div className="bar-row" key={String(n)}><span>{String(n).replaceAll('_',' ')}</span><div><i style={{width:`${pct}%`,background:c as string}}/></div><b>{count}</b></div>})}</div></Panel></div>
-  <Panel title="Live security activity" action="Open activity log" onAction={()=>onNavigate('Audit')}><div className="activity-feed">{list.slice(0,5).map((a,i)=><button className="feed-row" key={a.id} onClick={()=>onSelect(a)}><span className="feed-time">{a.time}</span><SeverityBadge severity={a.severity}/><span className="feed-type">ALERT</span><span className="feed-desc">{a.detection}</span><code>{a.source}</code><span className="feed-asset">{a.asset}</span><span className="feed-id">{a.id}</span><ChevronRight size={14}/></button>)}{list.length===0 && <p className="muted" style={{padding:'12px 0'}}>No alerts in this time range.</p>}</div></Panel>
+  <Panel title="Live security activity" action="Open activity log" onAction={()=>onNavigate('Audit')}><div className="scope-row"><ScopeTabs value={feedScope} onChange={setFeedScope} internal={list.filter(a=>inScope(a,'internal')).length} external={list.filter(a=>inScope(a,'external')).length}/></div><div className="activity-feed">{list.filter(a=>inScope(a,feedScope)).slice(0,5).map((a,i)=><button className="feed-row" key={a.id} onClick={()=>onSelect(a)}><span className="feed-time">{a.time}</span><SeverityBadge severity={a.severity}/><span className="feed-type">ALERT</span><span className="feed-desc">{a.detection}</span><code>{a.source}</code><span className="feed-asset">{a.asset}</span><span className="feed-id">{a.id}</span><ChevronRight size={14}/></button>)}{list.filter(a=>inScope(a,feedScope)).length===0 && <p className="muted" style={{padding:'12px 15px',margin:0}}>No {feedScope} alerts in this time range.</p>}</div></Panel>
   {showCreate && <CreateIncidentModal onClose={()=>setShowCreate(false)} onCreated={()=>{ setShowCreate(false); bumpRefresh() }}/>}
  </> }
 // Generic toolbar dropdown: a button that opens a small panel below it.
@@ -425,12 +440,14 @@ function DataTable({ onSelect, refreshKey }: {onSelect:(a:Alert)=>void; refreshK
   const [severityFilter,setSeverityFilter]=useState<Set<Severity>>(new Set())
   const [statusFilter,setStatusFilter]=useState<Set<string>>(new Set())
   const [visibleCols,setVisibleCols]=useState<Set<ColumnKey>>(new Set(ALL_COLUMNS.map(c=>c.key)))
+  const [scope,setScope]=useState<Scope>('external')
   useEffect(()=>{
     let cancelled=false
-    fetchJSON<ApiAlert[]>('/alerts').then(data=>{ if(!cancelled) setAlerts(data.map(mapAlert)) }).catch(()=>{ if(!cancelled){ setApiError(true); setAlerts(mockAlerts) } })
+    fetchJSON<ApiAlert[]>('/alerts').then(data=>{ if(!cancelled) setAlerts(newestFirst(data.map(mapAlert))) }).catch(()=>{ if(!cancelled){ setApiError(true); setAlerts(mockAlerts) } })
     return ()=>{ cancelled=true }
   },[refreshKey])
-  const list = alerts ?? []
+  const allList = alerts ?? []
+  const list = useMemo(()=>allList.filter(a=>inScope(a,scope)),[allList,scope])
   const filtered=useMemo(()=>list.filter(a=>
     `${a.id} ${a.detection} ${a.source} ${a.asset}`.toLowerCase().includes(query.toLowerCase())
     && (severityFilter.size===0 || severityFilter.has(a.severity))
@@ -441,7 +458,7 @@ function DataTable({ onSelect, refreshKey }: {onSelect:(a:Alert)=>void; refreshK
   const activeFilterCount = severityFilter.size + statusFilter.size
   const clearFilters = () => { setSeverityFilter(new Set()); setStatusFilter(new Set()) }
   const col = (key:ColumnKey) => visibleCols.has(key)
-  return <><div className="page-title"><div><div className="eyebrow">MONITOR / ALERT QUEUE</div><h1>Alerts <span className="title-count">{filtered.length} of {list.length} total</span></h1></div><button className="outline-btn" onClick={clearFilters} disabled={activeFilterCount===0}><SlidersHorizontal size={14}/> Filters <span className="filter-count">{activeFilterCount}</span></button></div><ApiNotice show={apiError}/><div className="toolbar"><div className="search-box"><Search size={15}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search alerts, IPs, IDs..."/></div>
+  return <><div className="page-title"><div><div className="eyebrow">MONITOR / ALERT QUEUE</div><h1>Alerts <span className="title-count">{filtered.length} of {list.length} {scope}</span></h1></div><button className="outline-btn" onClick={clearFilters} disabled={activeFilterCount===0}><SlidersHorizontal size={14}/> Filters <span className="filter-count">{activeFilterCount}</span></button></div><ApiNotice show={apiError}/><div className="toolbar"><div className="search-box"><Search size={15}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search alerts, IPs, IDs..."/></div>
     <FilterMenu label="Severity" count={severityFilter.size}>
       {SEVERITY_OPTIONS.map(s=><CheckboxRow key={s} checked={severityFilter.has(s)} onChange={()=>toggleSet(setSeverityFilter,s)} label={<SeverityBadge severity={s}/>}/>)}
     </FilterMenu>
@@ -451,15 +468,16 @@ function DataTable({ onSelect, refreshKey }: {onSelect:(a:Alert)=>void; refreshK
     <FilterMenu label="Columns">
       {ALL_COLUMNS.map(c=><CheckboxRow key={c.key} checked={visibleCols.has(c.key)} onChange={()=>toggleColumn(c.key)} label={c.label}/>)}
     </FilterMenu>
-  </div><div className="table-panel"><table><thead><tr>{col('severity')&&<th>SEVERITY</th>}{col('time')&&<th>TIME</th>}{col('id')&&<th>ALERT ID</th>}{col('detection')&&<th>DETECTION</th>}{col('source')&&<th>SOURCE IP</th>}{col('asset')&&<th>ASSET / SOURCE</th>}{col('technique')&&<th>MITRE</th>}{col('score')&&<th>RISK</th>}{col('status')&&<th>STATUS</th>}</tr></thead><tbody>{filtered.map(a=><tr key={a.id} onClick={()=>onSelect(a)}>{col('severity')&&<td><SeverityBadge severity={a.severity}/></td>}{col('time')&&<td className="mono muted">{a.time}</td>}{col('id')&&<td className="mono linkish">{a.id}</td>}{col('detection')&&<td className="detection-cell">{a.detection}</td>}{col('source')&&<td className="mono">{a.source}</td>}{col('asset')&&<td>{a.asset}</td>}{col('technique')&&<td className="mono muted">{a.technique}</td>}{col('score')&&<td><b style={{color: a.score>90?COLORS.critical:a.score>70?COLORS.high:COLORS.medium}}>{a.score}</b></td>}{col('status')&&<td><StatusBadge status={a.status}/></td>}</tr>)}{filtered.length===0 && <tr><td colSpan={visibleCols.size} className="muted" style={{textAlign:'center',padding:'28px 0'}}>No alerts match the current filters.</td></tr>}</tbody></table></div></> }
+    <ScopeTabs value={scope} onChange={setScope} internal={allList.filter(a=>inScope(a,'internal')).length} external={allList.filter(a=>inScope(a,'external')).length}/>
+  </div><div className="table-panel"><table><thead><tr>{col('severity')&&<th>SEVERITY</th>}{col('time')&&<th>TIME</th>}{col('id')&&<th>ALERT ID</th>}{col('detection')&&<th>DETECTION</th>}{col('source')&&<th>SOURCE IP</th>}{col('asset')&&<th>ASSET / SOURCE</th>}{col('technique')&&<th>MITRE</th>}{col('score')&&<th>RISK</th>}{col('status')&&<th>STATUS</th>}</tr></thead><tbody>{filtered.map(a=><tr key={a.id} onClick={()=>onSelect(a)}>{col('severity')&&<td><SeverityBadge severity={a.severity}/></td>}{col('time')&&<td className="mono muted">{a.time}</td>}{col('id')&&<td className="mono linkish">{a.id}</td>}{col('detection')&&<td className="detection-cell">{a.detection}</td>}{col('source')&&<td className="mono">{a.source}</td>}{col('asset')&&<td>{a.asset}</td>}{col('technique')&&<td className="mono muted">{a.technique}</td>}{col('score')&&<td><b style={{color: a.score>90?COLORS.critical:a.score>70?COLORS.high:COLORS.medium}}>{a.score}</b></td>}{col('status')&&<td><StatusBadge status={a.status}/></td>}</tr>)}{filtered.length===0 && <tr><td colSpan={visibleCols.size} className="muted" style={{textAlign:'center',padding:'28px 0'}}>No {scope} alerts match the current filters.</td></tr>}</tbody></table></div></> }
 function Drawer({ alert, close, onApprove, onReject, busy, error }: {alert:Alert;close:()=>void;onApprove:(a:Alert)=>void;onReject:(a:Alert)=>void;busy?:boolean;error?:string|null}) { const canAct = alert.status==='pending_approval'; return <><button className="drawer-backdrop" aria-label="Close drawer" onClick={close}/><aside className="drawer"><div className="drawer-head"><div><div className="eyebrow">ALERT INVESTIGATION</div><h2>{alert.id}</h2></div><button className="icon-btn" onClick={close}><X size={18}/></button></div><div className="drawer-summary"><SeverityBadge severity={alert.severity}/><h3>{alert.detection}</h3><div className="drawer-grid"><span>Risk score<strong>{alert.score}</strong></span><span>Source IP<strong className="mono">{alert.source}</strong></span><span>Asset<strong>{alert.asset}</strong></span><span>MITRE technique<strong className="mono">{alert.technique}</strong></span></div></div><div className="drawer-section"><div className="section-label">CURRENT STATUS</div><StatusBadge status={alert.status}/></div>{error && <p className="muted" style={{color:COLORS.critical}}>{error}</p>}<div className="drawer-actions">{canAct ? <><button className="reject-btn" disabled={busy} onClick={()=>onReject(alert)}>{busy?'Rejecting…':'Reject'}</button><button className="approve-btn" disabled={busy} onClick={()=>onApprove(alert)}>{busy?'Approving…':'Approve'}</button></> : <span className="muted">No pending approval on this alert.</span>}</div></aside></> }
 
 const incidents=[['Critical','INC-0091','185.220.101.42','14','T1110.004, T1078','PENDING APPROVAL','09:42','09:47'],['High','INC-0090','45.148.10.77','6','T1204.002','APPROVED','09:18','09:41'],['High','INC-0089','103.27.186.14','9','T1190','EXECUTED','08:56','09:39'],['Medium','INC-0088','91.240.118.172','21','T1110','PENDING APPROVAL','08:22','09:36'],['Low','INC-0087','172.16.4.22','3','T1078','REVIEW','07:40','09:31']]
 const iocs=[['185.220.101.42','IP','Malicious','AbuseIPDB','14'],['45.148.10.77','IP','Suspicious','VirusTotal','6'],['91.240.118.172','IP','Malicious','heuristic','21'],['a84f9c2d7e11b8a0','SHA256','Unknown','VirusTotal','2'],['103.27.186.14','IP','Suspicious','AbuseIPDB','9'],['d41d8cd98f00b204','MD5','Clean','VirusTotal','0'],['172.16.4.22','IP','Unknown','heuristic','3']]
 const playbooks=[['Critical Malware / Ransomware Containment','Malware or ransomware behavior detected',['Isolate affected host (manual)','Kill malicious process (manual)','Quarantine file hash (manual)','Block related IPs (manual)','Page on-call analyst (auto)']],['Credential / Brute-Force Response','Repeated authentication failures',['Lock user account (manual)','Block source IP (manual)','Force password reset (manual)','Notify SOC (auto)']],['Reconnaissance / Scanning Response','Port scan or broad discovery',['Add IP to watchlist (auto)','Rate-limit traffic (auto)','Log for correlation (auto)']],['Data Exfiltration Containment','Unusual outbound data volume',['Isolate host (manual)','Block outbound IP (manual)','Snapshot for forensics (auto)','Page analyst (auto)']],['Web Application Attack Response','WAF or application exploit detected',['Block IP at WAF (manual)','Add to watchlist (auto)','Notify SOC (auto)']],['Standard Analyst Triage','Medium-confidence alert correlation',['Log for SOC review (auto)','Add to triage queue (auto)']],['Monitor Only','Low-confidence activity',['Log for visibility (auto)']]]
 const rules=[['LOGIN_BRUTE_FORCE','3+ failed logins within 60s from one IP','Brute-force alert','12,481'],['CREDENTIAL_STUFFING','2+ distinct usernames failed from one IP within 60s','Credential stuffing alert','4,208'],['MULTI_STAGE_CORRELATION','2+ distinct attack types from one IP within 120s','Multi-stage attack alert','1,862'],['PATH_TRAVERSAL','blocked traversal attempt on target-app','alert','932'],['SUSPICIOUS_FILE_UPLOAD','disallowed file extension uploaded','alert','317']]
-function StateBadge({ value }: { value: string }) { const normalized=value.toLowerCase().replaceAll(' ','_'); const color=normalized.includes('success')||normalized.includes('online')||normalized.includes('automated')||normalized.includes('clean')?COLORS.success:normalized.includes('pending')||normalized.includes('approval')?COLORS.pending:normalized.includes('review')?'#60a5fa':normalized.includes('failed')||normalized.includes('offline')||normalized.includes('rejected')||normalized.includes('dismissed')?COLORS.critical:normalized.includes('manual')||normalized.includes('unknown')?COLORS.medium:'#2dd4bf'; return <span className="state-badge" style={{color,borderColor:`${color}55`,background:`${color}12`}}>{value}</span> }
-function SimpleTable({title,headers,rows,extra,titleActions,rightAlignCols,statusCol=2,colWidths}:{title:string;headers:string[];rows:string[][];extra?:React.ReactNode;titleActions?:React.ReactNode;rightAlignCols?:number[];statusCol?:number;colWidths?:(string|undefined)[]}){const statusWords=['Critical','High','Medium','Low','Malicious','Suspicious','Clean','Unknown','Online','Offline','Registered','Success','Failed','Dismissed','Automated','Manual','Approval Required','Pending Approval','Approved','Executed','Review','Reviewed','Rejected','PENDING APPROVAL','APPROVED','EXECUTED','REVIEW','REJECTED'];const cellStyle=(j:number)=>({...(rightAlignCols?.includes(j)?{textAlign:'right' as const}:{}),...(colWidths?.[j]?{width:colWidths[j]}:{})});return <><div className="page-title"><div><div className="eyebrow">OPERATIONS / SECURITY DATA</div><h1>{title}</h1></div>{titleActions && <div className="title-actions">{titleActions}</div>}</div>{extra}<div className="table-panel"><table><thead><tr>{headers.map((h,j)=><th key={h} style={cellStyle(j)}>{h}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{r.map((v,j)=><td key={j} className={j===0?'mono':''} style={cellStyle(j)}>{j===0&&['Critical','High','Medium','Low'].includes(v)?<SeverityBadge severity={v}/>:j===statusCol&&['Malicious','Suspicious','Clean','Unknown'].includes(v)?<SeverityBadge severity={v}/>:statusWords.includes(v)&&(!['Critical','High','Medium','Low'].includes(v))?<StateBadge value={v}/>:v}</td>)}</tr>)}{rows.length===0 && <tr><td colSpan={headers.length} className="muted" style={{textAlign:'center',padding:'28px 0'}}>No data yet.</td></tr>}</tbody></table></div></>}
+function StateBadge({ value }: { value: string }) { const normalized=value.toLowerCase().replaceAll(' ','_'); const color=normalized.includes('success')||normalized.includes('online')||normalized.includes('automated')||normalized.includes('clean')||normalized.includes('blocked')?COLORS.success:normalized.includes('pending')||normalized.includes('approval')?COLORS.pending:normalized.includes('review')?'#60a5fa':normalized.includes('failed')||normalized.includes('offline')||normalized.includes('rejected')||normalized.includes('dismissed')?COLORS.critical:normalized.includes('manual')||normalized.includes('unknown')||normalized.includes('paused')||normalized.includes('allowed')?COLORS.medium:'#2dd4bf'; return <span className="state-badge" style={{color,borderColor:`${color}55`,background:`${color}12`}}>{value}</span> }
+function SimpleTable({title,headers,rows,extra,titleActions,rightAlignCols,statusCol=2,colWidths,eyebrow,embedded}:{title:string;headers:string[];rows:string[][];extra?:React.ReactNode;titleActions?:React.ReactNode;rightAlignCols?:number[];statusCol?:number;colWidths?:(string|undefined)[];eyebrow?:string;embedded?:boolean}){const statusWords=['Critical','High','Medium','Low','Malicious','Suspicious','Clean','Unknown','Online','Offline','Registered','Success','Failed','Dismissed','Automated','Manual','Approval Required','Pending Approval','Approved','Monitored','Paused','Blocked','Detected (allowed)','Executed','Review','Reviewed','Rejected','PENDING APPROVAL','APPROVED','EXECUTED','REVIEW','REJECTED'];const cellStyle=(j:number)=>({...(rightAlignCols?.includes(j)?{textAlign:'right' as const}:{}),...(colWidths?.[j]?{width:colWidths[j]}:{})});return <>{!embedded && <div className="page-title"><div><div className="eyebrow">{eyebrow||'OPERATIONS / SECURITY DATA'}</div><h1>{title}</h1></div>{titleActions && <div className="title-actions">{titleActions}</div>}</div>}{extra}<div className="table-panel">{embedded && <div className="panel-head"><h2>{title}</h2>{titleActions}</div>}<table><thead><tr>{headers.map((h,j)=><th key={h} style={cellStyle(j)}>{h}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{r.map((v,j)=><td key={j} className={j===0?'mono':''} style={cellStyle(j)}>{j===0&&['Critical','High','Medium','Low'].includes(v)?<SeverityBadge severity={v}/>:j===statusCol&&['Malicious','Suspicious','Clean','Unknown'].includes(v)?<SeverityBadge severity={v}/>:statusWords.includes(v)&&(!['Critical','High','Medium','Low'].includes(v))?<StateBadge value={v}/>:v}</td>)}</tr>)}{rows.length===0 && <tr><td colSpan={headers.length} className="muted" style={{textAlign:'center',padding:'28px 0'}}>No data yet.</td></tr>}</tbody></table></div></>}
 // What makes this tab worth having next to Alerts: Alerts is a flat,
 // per-event list; Incidents is the correlated view -- one row per
 // multi-alert attack thread from the same source IP (see backend/main.py's
@@ -872,7 +890,7 @@ function ThreatMap(){
       </Panel>
     </div>
   </>}
-type ApiAsset = { hostname:string; ip:string|null; mac_address:string|null; owner:string|null; type:string; status:string; risk_score:number; active_incidents:number; max_severity:string|null; alert_count:number; last_seen:string }
+type ApiAsset = { hostname:string; ip:string|null; mac_address:string|null; owner:string|null; type:string; status:string; risk_score:number; active_incidents:number; max_severity:string|null; alert_count:number; last_seen:string; monitoring?:boolean|null }
 
 // Generic centered form dialog -- distinct from the side Drawer, used for
 // "Add Asset" (and any future create/edit form) since a form reads better
@@ -947,6 +965,135 @@ function AddAssetModal({ onClose, onCreated }: { onClose:()=>void; onCreated:()=
   </Modal>
 }
 
+// ---- Devices running the Sysmon endpoint agent (endpoint-agent/sysmon_agent.py) ----
+type ApiAgent = { hostname:string; ip:string|null; os:string|null; agent_version:string|null; sysmon_status:string|null; first_seen:string; last_seen:string; events_total:number; online:boolean; alert_count:number; owner?:string|null; monitoring_enabled?:boolean; monitoring_active?:boolean; usage?:{ in_work_hours?:boolean; categories?:Record<string,{label:string; minutes:number; limit:number}> }|null }
+type ApiAgentEvent = { id:number; timestamp:string; event_id:number|null; event_type:string; summary:string; flagged:boolean }
+
+function EndpointActivityModal({ host, onClose }: { host:string; onClose:()=>void }) {
+  const [events,setEvents]=useState<ApiAgentEvent[]|null>(null)
+  const [onlyFlagged,setOnlyFlagged]=useState(false)
+  const [range,setRange]=useState<'new'|'1'|'3'>('new')   // New = newest first, no date cut; otherwise the last 1 or 3 days
+  useEffect(()=>{
+    let cancelled=false
+    const load=()=>fetchJSON<ApiAgentEvent[]>(`/agents/${encodeURIComponent(host)}/events?limit=${range==='new'?200:500}${onlyFlagged?'&flagged=true':''}${range==='new'?'':`&days=${range}`}`).then(d=>{ if(!cancelled) setEvents(d) }).catch(()=>{ if(!cancelled) setEvents(prev=>prev ?? []) })
+    load()
+    const t=setInterval(load,2000)
+    return ()=>{ cancelled=true; clearInterval(t) }
+  },[host,onlyFlagged,range])
+  const shown=(events ?? []).filter(e=>!onlyFlagged || e.flagged)
+  return <Modal title={`Live activity -- ${host}`} onClose={onClose}>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap',marginBottom:10}}>
+      <label className="checkbox-field" style={{margin:0}}><input type="checkbox" checked={onlyFlagged} onChange={e=>setOnlyFlagged(e.target.checked)}/> Show only events that raised an alert</label>
+      <select className="ctl-input" value={range} onChange={e=>setRange(e.target.value as 'new'|'1'|'3')} aria-label="Time range">
+        <option value="new">New</option><option value="1">Last 1 day</option><option value="3">Last 3 days</option>
+      </select>
+    </div>
+    <div style={{maxHeight:'55vh',overflowY:'auto'}}>
+      {events===null && <p className="muted">Loading…</p>}
+      {events!==null && shown.length===0 && <p className="muted">No events yet.</p>}
+      {shown.map(e=><div key={e.id} style={{display:'grid',gridTemplateColumns:'78px 70px 1fr',gap:10,padding:'6px 0',borderBottom:'1px solid rgba(128,128,128,.2)',alignItems:'baseline',color:e.flagged?COLORS.critical:undefined}}>
+        <span className="mono muted">{toLocalTime(e.timestamp)}</span>
+        <strong style={{fontSize:12}}>{e.flagged?'⚠ ':''}{e.event_type}</strong>
+        <span className="mono" style={{fontSize:12,wordBreak:'break-word'}}>{e.summary}</span>
+      </div>)}
+    </div>
+  </Modal>
+}
+
+async function postJSON<T>(path:string, body?:unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { method:'POST', headers:{'content-type':'application/json'}, body: body===undefined ? undefined : JSON.stringify(body) })
+  if(!res.ok) throw new Error(`${path} -> ${res.status}`)
+  return res.json() as Promise<T>
+}
+
+// ON/OFF pill used for the monitoring and VPN-blocking switches.
+function OnOffSwitch({ on, busy, onChange }: { on:boolean; busy?:boolean; onChange:(next:boolean)=>void }) {
+  return <button type="button" className="sw" disabled={busy} onClick={()=>onChange(!on)} aria-pressed={on}>
+    <span className={`toggle ${on?'':'off'}`}/><span className={on?'on':'off'}>{on?'On':'Off'}</span>
+  </button>
+}
+
+function UsageBars({ usage, paused }: { usage:ApiAgent['usage']; paused:boolean }) {
+  const cats = Object.values(usage?.categories ?? {}).filter(c=>c.limit>0)
+  if(cats.length===0) return null
+  return <div style={{display:'grid',gap:6,opacity:paused?0.5:1}}>
+    {cats.map(c=>{
+      const pct=Math.min(100, Math.round(c.minutes/c.limit*100)); const over=c.minutes>c.limit
+      return <div className="usage-row" key={c.label}>
+        <div><span>{c.label}</span><span style={{color:over?COLORS.critical:undefined}}>{c.minutes} / {c.limit} min</span></div>
+        <div className="usage-track"><div className="usage-fill" style={{width:`${pct}%`,background:over?COLORS.critical:COLORS.info}}/></div>
+      </div>
+    })}
+  </div>
+}
+
+function ConnectedEndpoints(){
+  const [agents,setAgents]=useState<ApiAgent[]|null>(null)
+  const [globalOn,setGlobalOn]=useState<boolean|null>(null)
+  const [open,setOpen]=useState<string|null>(null)
+  const [busy,setBusy]=useState<string|null>(null)
+  const [switchError,setSwitchError]=useState<string|null>(null)
+  const load=()=>Promise.all([
+    fetchJSON<ApiAgent[]>('/agents').then(setAgents).catch(()=>setAgents(prev=>prev ?? [])),
+    fetchJSON<{enabled:boolean}>('/settings/monitoring').then(d=>setGlobalOn(d.enabled)).catch(()=>{}),
+  ])
+  useEffect(()=>{
+    let cancelled=false
+    const run=()=>{ if(!cancelled) load() }
+    run()
+    const t=setInterval(run,3000)
+    return ()=>{ cancelled=true; clearInterval(t) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[])
+  const setAll=async(next:boolean)=>{
+    setBusy('*'); setSwitchError(null)
+    try{ const d=await postJSON<{enabled:boolean}>('/settings/monitoring',{enabled:next}); setGlobalOn(d.enabled); await load() }
+    catch{ setSwitchError('Could not change the switch. Is the backend running?') }
+    finally{ setBusy(null) }
+  }
+  const setOne=async(host:string,next:boolean)=>{
+    setBusy(host); setSwitchError(null)
+    try{ await postJSON(`/agents/${encodeURIComponent(host)}/monitoring`,{enabled:next}); await load() }
+    catch{ setSwitchError(`Could not change monitoring for ${host}.`) }
+    finally{ setBusy(null) }
+  }
+  const list=agents ?? []
+  const online=list.filter(a=>a.online).length
+  const allOn = globalOn!==false
+  return <section className="panel">
+    <div className="panel-head"><h2>Connected endpoints (Sysmon)</h2><span className="muted" style={{fontSize:11}}>{online} online · {list.length} total</span></div>
+    <div className="master-bar">
+      <div className="ctl-text"><strong>Monitoring · all devices</strong><small>Master switch</small></div>
+      <OnOffSwitch on={allOn} busy={busy==='*'} onChange={setAll}/>
+    </div>
+    {switchError && <p className="ctl-msg bad" style={{padding:'0 15px'}}>{switchError}</p>}
+    {list.length===0
+      ? <p className="muted" style={{padding:'16px 15px',margin:0,fontSize:12}}>No devices connected yet.</p>
+      : <div className="dev-grid">
+        {list.map(a=>{
+          const deviceOn = a.monitoring_enabled!==false
+          const active = a.monitoring_active ?? (allOn && deviceOn)
+          return <div key={a.hostname} className="dev-card">
+            <div className="dev-head">
+              <strong title={a.hostname}>{a.hostname}</strong>
+              <span className="dev-state" style={{color:a.online?COLORS.success:undefined}}>● {a.online?'Online':'Offline'}</span>
+            </div>
+            <div className="dev-meta">{a.owner||'No owner'} · {a.ip||'IP unknown'} · {toLocalTime(a.last_seen)}</div>
+            <div className="dev-row">
+              <span className={`dev-state ${active?'on':'off'}`}>{active?'Monitored':'Paused'}</span>
+              <OnOffSwitch on={deviceOn} busy={busy===a.hostname} onChange={next=>setOne(a.hostname,next)}/>
+            </div>
+            <UsageBars usage={a.usage} paused={!active}/>
+            <div className="dev-foot">
+              <span className="dev-meta"><b>{a.events_total}</b> events · <b style={{color:a.alert_count>0?COLORS.critical:undefined}}>{a.alert_count}</b> alerts</span>
+              <button className="outline-btn" onClick={()=>setOpen(a.hostname)}>View activity</button>
+            </div>
+          </div>})}
+      </div>}
+    {open && <EndpointActivityModal host={open} onClose={()=>setOpen(null)}/>}
+  </section>
+}
+
 function Assets(){
   const [assets,setAssets]=useState<ApiAsset[]|null>(null)
   const [apiError,setApiError]=useState(false)
@@ -954,19 +1101,24 @@ function Assets(){
   const [refreshKey,setRefreshKey]=useState(0)
   useEffect(()=>{
     let cancelled=false
-    fetchJSON<ApiAsset[]>('/assets').then(d=>{ if(!cancelled) setAssets(d) }).catch(()=>{ if(!cancelled){ setApiError(true); setAssets([]) } })
-    return ()=>{ cancelled=true }
+    const load=()=>fetchJSON<ApiAsset[]>('/assets').then(d=>{ if(!cancelled){ setAssets(d); setApiError(false) } }).catch(()=>{ if(!cancelled){ setApiError(true); setAssets(prev=>prev ?? []) } })
+    load()
+    const t=setInterval(load,3000)   // keep Online/Offline, risk and incident counts live
+    return ()=>{ cancelled=true; clearInterval(t) }
   },[refreshKey])
-  const rows = (assets ?? []).map(a=>[a.hostname, a.ip||'—', a.mac_address||'—', a.owner||'—', a.type, a.status, String(a.risk_score), String(a.active_incidents), toLocalTime(a.last_seen)])
-  return <><ApiNotice show={apiError}/>
-    <SimpleTable
-      title="Assets"
-      headers={['ASSET / SOURCE','IP','MAC ADDRESS','OWNER','TYPE','STATUS','RISK SCORE','ACTIVE INCIDENTS','LAST SEEN']}
-      rows={rows}
-      rightAlignCols={[6,7]}
-      statusCol={-1}
-      titleActions={<button className="primary-btn" onClick={()=>setShowAdd(true)}><Plus size={15}/> Add Asset</button>}
-    />
+  const rows = (assets ?? []).map(a=>[a.hostname, a.ip||'—', a.mac_address||'—', a.owner||'—', a.type, a.status, String(a.risk_score), String(a.active_incidents), toLocalTime(a.last_seen), a.monitoring==null ? '—' : (a.monitoring ? 'Monitored' : 'Paused')])
+  return <><div className="page-title"><div><div className="eyebrow">OPERATIONS / ASSETS</div><h1>Assets</h1></div><div className="title-actions"><button className="primary-btn" onClick={()=>setShowAdd(true)}><Plus size={15}/> Add Asset</button></div></div><ApiNotice show={apiError}/>
+    <div className="stack">
+      <ConnectedEndpoints/>
+      <SimpleTable
+        embedded
+        title="Asset inventory"
+        headers={['ASSET / SOURCE','IP','MAC ADDRESS','OWNER','TYPE','STATUS','RISK SCORE','ACTIVE INCIDENTS','LAST SEEN','MONITORING']}
+        rows={rows}
+        rightAlignCols={[6,7]}
+        statusCol={-1}
+      />
+    </div>
     {showAdd && <AddAssetModal onClose={()=>setShowAdd(false)} onCreated={()=>setRefreshKey(k=>k+1)}/>}
   </>
 }
@@ -1069,7 +1221,7 @@ function DailyReport(){
     return ()=>{ cancelled=true }
   },[])
   const list = reports ?? []
-  return <><div className="page-title"><div><div className="eyebrow">SYSTEM / GENERATED OUTPUT</div><h1>24-Hour Report</h1></div></div><ApiNotice show={apiError}/><div className="report-list">{list.length===0 && !apiError && <p className="muted" style={{padding:'16px 0'}}>No 24-hour digest yet — this needs report-generator/generate_daily_report.py running as its own process (it writes one consolidated PDF covering the last 24 hours, then again every 24 hours; it doesn't start automatically with the backend, and it's separate from the per-cycle Reports tab).</p>}{list.map(r=><div className="report-row" key={r.filename}><FileClock size={18}/><div><strong>{r.filename}</strong><span>Generated {formatReportTimestamp(r.generated_at)}</span></div><a className="outline-btn" href={`${API_BASE}${r.download_url}?downloaded_by=${encodeURIComponent(getCurrentAdminName()||'analyst')}`} target="_blank" rel="noreferrer">Download</a></div>)}</div></>}
+  return <><div className="page-title"><div><div className="eyebrow">SYSTEM / GENERATED OUTPUT</div><h1>24-Hour Report</h1></div></div><ApiNotice show={apiError}/><div className="report-list">{list.length===0 && !apiError && <p className="muted" style={{padding:'16px 0'}}>No 24-hour reports yet.</p>}{list.map(r=><div className="report-row" key={r.filename}><FileClock size={18}/><div><strong>{r.filename}</strong><span>Generated {formatReportTimestamp(r.generated_at)}</span></div><a className="outline-btn" href={`${API_BASE}${r.download_url}?downloaded_by=${encodeURIComponent(getCurrentAdminName()||'analyst')}`} target="_blank" rel="noreferrer">Download</a></div>)}</div></>}
 type ApiDetectionRule = { key:string; name:string; description:string; source:string; enabled:boolean; times_triggered:number }
 // Short label shown in the CONDITION column, with the full sentence only
 // a click away (see the modal below) -- generated from the real
@@ -1148,7 +1300,7 @@ function Integrations(){
     return ()=>{ cancelled=true; clearInterval(interval) }
   },[])
   const list = data ?? []
-  return <><div className="page-title"><div><div className="eyebrow">SYSTEM / CONNECTED SERVICES</div><h1>Integrations</h1></div></div><ApiNotice show={apiError}/><div className="integration-list">{list.map(x=>{ const failureCount=(x.recent_failures??[]).length; return <div className="integration-row" key={x.name}><div><strong>{x.name}</strong><span className={x.connected?'connected':'disconnected'}><i/>{x.connected?'Connected':'Not configured'}</span>{failureCount>0 && <button className="integration-issue" onClick={()=>setDetail(x)}><AlertTriangle size={11}/> {failureCount} recent failure{failureCount===1?'':'s'}</button>}</div><small className="integration-last-checked" title={x.detail}>{checkedAt ? `Checked ${checkedAt}` : 'Checking…'}</small></div> })}</div><p className="muted" style={{padding:'12px 0 0'}}>Re-checked automatically every {INTEGRATIONS_REFRESH_MS/1000}s. "Connected" means the API key/webhook is configured -- click a "recent failures" flag to see exactly what broke on an actual call and when.</p>{detail && <IntegrationDetailModal integration={detail} onClose={()=>setDetail(null)}/>}</>}
+  return <><div className="page-title"><div><div className="eyebrow">SYSTEM / CONNECTED SERVICES</div><h1>Integrations</h1></div></div><ApiNotice show={apiError}/><div className="integration-list">{list.map(x=>{ const failureCount=(x.recent_failures??[]).length; return <div className="integration-row" key={x.name}><div><strong>{x.name}</strong><span className={x.connected?'connected':'disconnected'}><i/>{x.connected?'Connected':'Not configured'}</span>{failureCount>0 && <button className="integration-issue" onClick={()=>setDetail(x)}><AlertTriangle size={11}/> {failureCount} recent failure{failureCount===1?'':'s'}</button>}</div><small className="integration-last-checked" title={x.detail}>{checkedAt ? `Checked ${checkedAt}` : 'Checking…'}</small></div> })}</div><p className="muted" style={{padding:'10px 0 0',fontSize:11}}>Auto-checked every {INTEGRATIONS_REFRESH_MS/1000}s</p>{detail && <IntegrationDetailModal integration={detail} onClose={()=>setDetail(null)}/>}</>}
 // A dedicated admin panel is planned separately, so playbook
 // auto-approval — a real security-relevant control — no longer lives here
 // as a toggle with no backend behind it. Replaced with two settings that
@@ -1256,7 +1408,7 @@ function AdminPanel({currentAdmin,setCurrentAdmin}:{currentAdmin:AdminInfo|null;
       <Panel title="Signed in as">
         {currentAdmin
           ? <div className="admin-current"><div className="admin-current-row"><UserRound size={22}/><div><strong>{currentAdmin.name}</strong><span>{currentAdmin.role || 'Admin'} · Company ID {currentAdmin.company_id}</span></div></div><button className="outline-btn" onClick={doLogout} disabled={loggingOut}>{loggingOut?'Logging out…':'Log out'}</button></div>
-          : <p className="muted">No admin signed in — actions are attributed to "analyst" until someone logs in or is created.</p>}
+          : <p className="muted" style={{fontSize:12}}>Not signed in (actions are logged as "analyst")</p>}
       </Panel>
       <Panel title="Log in as existing admin">
         <div className="form-stack">
@@ -1277,32 +1429,138 @@ function AdminPanel({currentAdmin,setCurrentAdmin}:{currentAdmin:AdminInfo|null;
         </div>
       </Panel>
     </div>
+    <div className="stack">
     <Panel title="Approval policy" className="admin-policy-panel">
-      <p className="muted" style={{margin:'0 0 12px'}}>Auto/Manual per severity and per playbook — saved as a preference only for now; the response engine doesn't read this yet, so it doesn't change what actually happens to a real incoming alert.</p>
+      <p className="muted" style={{margin:'0 0 12px',fontSize:11}}>Saved as a preference; not yet applied by the response engine.</p>
       <div className="policy-section"><h3>By severity</h3><div className="policy-grid">{Object.entries(policy?.severity ?? {}).map(([sev,mode])=><div className="policy-row" key={sev}><span>{sev}</span><div className="theme-options"><button className={mode==='auto'?'selected':''} onClick={()=>setPolicyMode('severity',sev,'auto')}>Auto</button><button className={mode==='manual'?'selected':''} onClick={()=>setPolicyMode('severity',sev,'manual')}>Manual</button></div></div>)}</div></div>
       <div className="policy-section"><h3>By playbook</h3><div className="policy-grid">{Object.entries(policy?.playbook ?? {}).map(([pb,mode])=><div className="policy-row" key={pb}><span>{pb}</span><div className="theme-options"><button className={mode==='auto'?'selected':''} onClick={()=>setPolicyMode('playbook',pb,'auto')}>Auto</button><button className={mode==='manual'?'selected':''} onClick={()=>setPolicyMode('playbook',pb,'manual')}>Manual</button></div></div>)}</div></div>
     </Panel>
-    <SimpleTable title="Admin access log" headers={['ADMIN','COMPANY ID','ROLE','LOGGED IN','LOGGED OUT']} rows={sessionRows} colWidths={['150px','130px','120px','170px','170px']} statusCol={-1}/>
-    <SimpleTable title="Report downloads" headers={['TIMESTAMP','DOWNLOADED BY','FILE','RESULT']} rows={downloadRows} colWidths={['150px','150px',undefined,'110px']} statusCol={-1}/>
+    <SimpleTable embedded title="Admin access log" headers={['ADMIN','COMPANY ID','ROLE','LOGGED IN','LOGGED OUT']} rows={sessionRows} colWidths={['150px','130px','120px','170px','170px']} statusCol={-1}/>
+    <SimpleTable embedded title="Report downloads" headers={['TIMESTAMP','DOWNLOADED BY','FILE','RESULT']} rows={downloadRows} colWidths={['150px','150px',undefined,'110px']} statusCol={-1}/>
+    </div>
   </>
 }
+type ApiRansomIncident = { alert_id:number; timestamp:string; source:string; severity:string; description:string; risk_score:number|null; response_action:string|null; response_status:string|null; mitre_technique:string|null }
+type ApiRansomStatus = { active:boolean; total:number; incidents:ApiRansomIncident[] }
+function useRansomwareStatus(intervalMs:number){
+  const [status,setStatus]=useState<ApiRansomStatus|null>(null)
+  const [failed,setFailed]=useState(false)
+  useEffect(()=>{
+    let cancelled=false
+    const load=()=>fetchJSON<ApiRansomStatus>('/ransomware/status').then(d=>{ if(!cancelled){ setStatus(d); setFailed(false) } }).catch(()=>{ if(!cancelled) setFailed(true) })
+    load()
+    const t=setInterval(load,intervalMs)
+    return ()=>{ cancelled=true; clearInterval(t) }
+  },[intervalMs])
+  return { status, failed }
+}
+
+// Red banner across the top of every page while a ransomware incident is recent.
+function RansomwareBanner({ onOpen }: { onOpen:()=>void }) {
+  const { status } = useRansomwareStatus(4000)
+  if(!status?.active) return null
+  const latest = status.incidents[0]
+  return <div role="alert" style={{display:'flex',alignItems:'center',gap:12,padding:'10px 24px',background:'#7f1d1d',color:'#fff',borderBottom:'1px solid #ef4444',fontSize:12}}>
+    <AlertTriangle size={16}/>
+    <strong>RANSOMWARE ACTIVITY DETECTED</strong>
+    <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{latest ? `${latest.source} · ${toLocalTime(latest.timestamp)}` : ''}</span>
+    <button className="outline-btn" style={{color:'#fff',borderColor:'#fca5a5',background:'transparent'}} onClick={onOpen}>Open</button>
+  </div>
+}
+
+function RansomwarePage(){
+  const { status, failed } = useRansomwareStatus(3000)
+  const [detail,setDetail]=useState<ApiRansomIncident|null>(null)
+  const list = status?.incidents ?? []
+  const latest = list[0]
+  const active = !!status?.active
+  return <><div className="page-title"><div><div className="eyebrow">MONITOR / RANSOMWARE</div><h1>Ransomware</h1></div></div><ApiNotice show={failed}/>
+    <div className="action-tiles">
+      <div className="action-tile"><span>Status</span><strong style={{color:active?COLORS.critical:COLORS.success}}>{status ? (active?'Under attack':'Clear') : '—'}</strong></div>
+      <div className="action-tile"><span>Incidents</span><strong>{status ? status.total : '—'}</strong></div>
+      <div className="action-tile"><span>Latest detection</span><strong className="tile-text">{latest ? toLocalTime(latest.timestamp) : '—'}</strong></div>
+      <div className="action-tile"><span>Latest source</span><strong className="tile-text" title={latest?.source}>{latest?.source ?? '—'}</strong></div>
+      <div className="action-tile"><span>Latest response</span><strong className="tile-text" title={latest?.response_action ?? undefined}>{latest?.response_action ?? '—'}</strong></div>
+    </div>
+    <div className="table-panel">
+      <div className="panel-head"><h2>Incidents</h2></div>
+      <table style={{tableLayout:'fixed'}}>
+        <colgroup><col style={{width:100}}/><col style={{width:170}}/><col style={{width:110}}/><col style={{width:70}}/><col/><col style={{width:160}}/><col style={{width:100}}/></colgroup>
+        <thead><tr><th>TIME</th><th>SOURCE</th><th>SEVERITY</th><th>RISK</th><th>RESPONSE</th><th>STATUS</th><th/></tr></thead>
+        <tbody>
+          {list.map(i=><tr key={i.alert_id}>
+            <td className="mono muted">{toLocalTime(i.timestamp)}</td>
+            <td className="cell-ellipsis" title={i.source}>{i.source}</td>
+            <td><SeverityBadge severity={i.severity}/></td>
+            <td><b>{i.risk_score ?? '—'}</b></td>
+            <td className="cell-ellipsis" title={i.response_action ?? undefined}>{i.response_action||'—'}</td>
+            <td><StatusBadge status={i.response_status||'pending_approval'}/></td>
+            <td style={{textAlign:'right'}}><button className="outline-btn" onClick={()=>setDetail(i)}>Details</button></td>
+          </tr>)}
+          {list.length===0 && <tr><td colSpan={7} className="muted" style={{textAlign:'center',padding:'28px 0'}}>No ransomware incidents.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    {detail && <Modal title={`Incident ALT-${detail.alert_id}`} onClose={()=>setDetail(null)}>
+      <div className="detail-grid">
+        <div><span>Time</span><strong>{toLocalDateTime(detail.timestamp)}</strong></div>
+        <div><span>Source</span><strong>{detail.source}</strong></div>
+        <div><span>Severity</span><strong>{detail.severity}</strong></div>
+        <div><span>Risk score</span><strong>{detail.risk_score ?? '—'}</strong></div>
+        <div><span>MITRE technique</span><strong>{detail.mitre_technique ?? '—'}</strong></div>
+        <div><span>Response</span><strong>{detail.response_action ?? '—'}</strong></div>
+      </div>
+      <p className="detail-text">{detail.description}</p>
+    </Modal>}
+  </>
+}
+
 type ApiBlocklistStats = { total_entries:number; by_category:Record<string,number>; by_source:Record<string,number>; feeds_file_present:boolean; blocks_alerted:number }
+type ApiVpnRow = { id:number; timestamp:string; ip:string; category:string|null; provider:string|null; country:string|null; action:string; severity:string; alert_id:number }
+type ApiCustomEntry = { entry:string; category:string; label:string }
 type ApiBlocklistMatch = { ip:string; category:string; label:string; network:string; source:string }
 // VPN / Tor / proxy IPs that are refused on arrival (threat-intelligence/anonymizer_blocklist.txt,
-// plus the optional downloaded feeds). Counts come from GET /blocklist; the lookup box uses GET /blocklist/check.
+// plus the optional downloaded feeds and anything added from this page). Counts come from GET /blocklist;
+// the lookup box uses GET /blocklist/check; the table is GET /vpn-activity.
 function IpBlocklist(){
   const [stats,setStats]=useState<ApiBlocklistStats|null>(null)
   const [apiError,setApiError]=useState(false)
   const [q,setQ]=useState('203.0.113.9')
   const [checked,setChecked]=useState<{ip:string; match:ApiBlocklistMatch|null}|null>(null)
   const [checking,setChecking]=useState(false)
+  const [autoBlock,setAutoBlock]=useState<boolean|null>(null)
+  const [switchBusy,setSwitchBusy]=useState(false)
+  const [vpnRows,setVpnRows]=useState<ApiVpnRow[]>([])
+  const [custom,setCustom]=useState<ApiCustomEntry[]>([])
+  const [newEntry,setNewEntry]=useState('')
+  const [newLabel,setNewLabel]=useState('')
+  const [newCat,setNewCat]=useState('vpn')
+  const [formMsg,setFormMsg]=useState<{ok:boolean;text:string}|null>(null)
+  const loadStats=()=>fetchJSON<ApiBlocklistStats>('/blocklist').then(d=>{ setStats(d); setApiError(false) }).catch(()=>setApiError(true))
+  const loadCustom=()=>fetchJSON<ApiCustomEntry[]>('/blocklist/custom').then(setCustom).catch(()=>{})
   useEffect(()=>{
     let cancelled=false
-    const load=()=>fetchJSON<ApiBlocklistStats>('/blocklist').then(d=>{ if(!cancelled){ setStats(d); setApiError(false) } }).catch(()=>{ if(!cancelled) setApiError(true) })
-    load()
-    const t=setInterval(load,10_000)
+    const load=()=>{
+      fetchJSON<{auto_block:boolean}>('/settings/vpn-block').then(d=>{ if(!cancelled) setAutoBlock(d.auto_block) }).catch(()=>{})
+      fetchJSON<{rows:ApiVpnRow[]}>('/vpn-activity?limit=50').then(d=>{ if(!cancelled) setVpnRows(d.rows) }).catch(()=>{})
+    }
+    load(); loadCustom()
+    const t=setInterval(load,3000)
     return ()=>{ cancelled=true; clearInterval(t) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   },[])
+  useEffect(()=>{
+    loadStats()
+    const t=setInterval(loadStats,10_000)
+    return ()=>clearInterval(t)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[])
+  const changeAutoBlock=async(next:boolean)=>{
+    setSwitchBusy(true)
+    try{ const d=await postJSON<{auto_block:boolean}>('/settings/vpn-block',{enabled:next}); setAutoBlock(d.auto_block) }
+    catch{ setApiError(true) }
+    finally{ setSwitchBusy(false) }
+  }
   const check=async()=>{
     const value=q.trim()
     if(!value) return
@@ -1311,14 +1569,57 @@ function IpBlocklist(){
     catch{ setApiError(true); setChecked(null) }
     finally{ setChecking(false) }
   }
+  const addEntry=async()=>{
+    const entry=newEntry.trim()
+    if(!entry) return
+    setFormMsg(null)
+    try{
+      await postJSON('/blocklist/custom',{entry,category:newCat,label:newLabel.trim()||'Added from dashboard'})
+      setFormMsg({ok:true,text:`Added ${entry}.`}); setNewEntry(''); setNewLabel('')
+      loadCustom(); loadStats()
+    }catch{ setFormMsg({ok:false,text:'Not added. Use a public IP or range, e.g. 203.0.113.0/24.'}) }
+  }
+  const removeEntry=async(entry:string)=>{
+    try{ const r=await fetch(`${API_BASE}/blocklist/custom?entry=${encodeURIComponent(entry)}`,{method:'DELETE'}); if(r.ok){ loadCustom(); loadStats() } }catch{ /* leave as is */ }
+  }
   const n=(v:number|undefined)=>stats ? (v ?? 0).toLocaleString() : '—'
-  return <><div className="page-title"><div><div className="eyebrow">INTELLIGENCE / IDENTITY MASKING</div><h1>IP Blocklist</h1></div></div><ApiNotice show={apiError}/>
+  const blockingOn = autoBlock!==false
+  return <><div className="page-title"><div><div className="eyebrow">INTELLIGENCE / IP BLOCKLIST</div><h1>IP Blocklist</h1></div></div><ApiNotice show={apiError}/>
     <div className="action-tiles"><div className="action-tile"><span>Blocklist entries</span><strong>{n(stats?.total_entries)}</strong></div><div className="action-tile"><span>VPN</span><strong>{n(stats?.by_category.vpn)}</strong></div><div className="action-tile"><span>Tor exit nodes</span><strong>{n(stats?.by_category.tor)}</strong></div><div className="action-tile"><span>Open proxies</span><strong>{n(stats?.by_category.proxy)}</strong></div><div className="action-tile"><span>Connections blocked</span><strong>{n(stats?.blocks_alerted)}</strong></div></div>
-    <div className="investigation-search"><Search size={15}/><input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') check()}} placeholder="Check an IP against the blocklist"/><button className="primary-btn" onClick={check} disabled={checking}>Check</button></div>
-    {checked && <Panel title={`Result · ${checked.ip}`}>{checked.match ? <div className="ioc-result"><div className="ioc-field"><span>Verdict</span><strong style={{color:'var(--red, #d96b6b)'}}>BLOCKED</strong></div><div className="ioc-field"><span>Type</span><strong>{checked.match.category.toUpperCase()}</strong></div><div className="ioc-field"><span>Matched range</span><strong className="mono">{checked.match.network}</strong></div><div className="ioc-field"><span>Label</span><strong>{checked.match.label}</strong></div><div className="ioc-field"><span>From list</span><strong>{checked.match.source}</strong></div></div> : <p className="muted" style={{margin:0}}>Not on the blocklist, so this address is allowed through.</p>}</Panel>}
-    <p className="muted" style={{padding:'12px 0 0',lineHeight:1.6}}>Requests from these addresses are refused by the target app before they reach the login page, and the SOAR blocks the IP automatically instead of waiting for approval. The shipped entries are demo ranges; run <span className="mono">python threat-intelligence/update_blocklist.py</span> once, with internet, to load the public Tor exit-node and VPN lists{stats?.feeds_file_present ? ' (already loaded)' : ''}. Private and local addresses are never blocked.</p></>
+    <div className="stack">
+      <div className="ctl-grid">
+        <div className="ctl-card">
+          <div className="ctl-text"><strong>Auto-block VPN / Tor</strong><small>{blockingOn?'Blocking on arrival':'Detect and log only'}</small></div>
+          <OnOffSwitch on={blockingOn} busy={switchBusy} onChange={changeAutoBlock}/>
+        </div>
+        <div className="ctl-card">
+          <div className="ctl-row" style={{flex:1,flexWrap:'nowrap'}}>
+            <input className="ctl-input" style={{flex:1}} value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') check()}} placeholder="Check an IP"/>
+            <button className="outline-btn" onClick={check} disabled={checking}><Search size={13}/> Check</button>
+          </div>
+        </div>
+      </div>
+      {checked && <Panel title={`Result · ${checked.ip}`}>{checked.match ? <div className="panel-body"><div className="ioc-result"><div className="ioc-field"><span>Verdict</span><strong style={{color:COLORS.critical}}>BLOCKED</strong></div><div className="ioc-field"><span>Type</span><strong>{checked.match.category.toUpperCase()}</strong></div><div className="ioc-field"><span>Matched range</span><strong className="mono">{checked.match.network}</strong></div><div className="ioc-field"><span>Label</span><strong>{checked.match.label}</strong></div><div className="ioc-field"><span>From list</span><strong>{checked.match.source}</strong></div></div></div> : <p className="muted" style={{margin:0,padding:'12px 15px',fontSize:12}}>Not on the blocklist.</p>}</Panel>}
+      <Panel title="Add IP or range">
+        <div className="panel-body">
+          <div className="ctl-row">
+            <input className="ctl-input" style={{flex:'1 1 180px'}} value={newEntry} onChange={e=>setNewEntry(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') addEntry()}} placeholder="IP or range"/>
+            <select className="ctl-input" value={newCat} onChange={e=>setNewCat(e.target.value)}><option value="vpn">VPN</option><option value="tor">Tor</option><option value="proxy">Proxy</option></select>
+            <input className="ctl-input" style={{flex:'1 1 140px'}} value={newLabel} onChange={e=>setNewLabel(e.target.value)} onKeyDown={e=>{if(e.key==='Enter') addEntry()}} placeholder="Label (optional)"/>
+            <button className="primary-btn" onClick={addEntry}><Plus size={14}/> Add</button>
+          </div>
+          {formMsg && <p className={`ctl-msg ${formMsg.ok?'ok':'bad'}`}>{formMsg.text}</p>}
+          {custom.length>0 && <div style={{marginTop:10}}>{custom.map(c=><div className="entry-row" key={c.entry}><span><span className="mono">{c.entry}</span> <span className="muted">· {c.category.toUpperCase()} · {c.label}</span></span><button className="outline-btn" onClick={()=>removeEntry(c.entry)}>Remove</button></div>)}</div>}
+        </div>
+      </Panel>
+      <SimpleTable embedded title="VPN / Tor activity" headers={['TIME','IP ADDRESS','PROVIDER','TYPE','COUNTRY','ACTION','SEVERITY']}
+        rows={vpnRows.map(r=>[toLocalTime(r.timestamp), r.ip, r.provider||'—', (r.category||'—').toUpperCase(), r.country||'Unknown', r.action, r.severity])} statusCol={-1}/>
+    </div></>
 }
-function WorkspacePage({title,light,setLight,currentAdmin,setCurrentAdmin}:{title:string;light:boolean;setLight:(value:boolean)=>void;currentAdmin:AdminInfo|null;setCurrentAdmin:(a:AdminInfo|null)=>void}){const pages:Record<string,React.ReactNode>={Incidents:<Incidents/>,Investigations:<Investigations/>,Playbooks:<Playbooks/>,Runbook:<Runbook/>, 'Threat Intelligence':<ThreatIntel/>, 'Global Threat Map':<ThreatMap/>,'IP Blocklist':<IpBlocklist/>,Assets:<Assets/>, 'Response Center':<ResponseCenter/>, 'SSH / Sessions':<SshSessions/>,Audit:<Audit/>,Reports:<Reports/>, '24-Hour Report':<DailyReport/>, 'Detection Rules':<DetectionRules/>,Integrations:<Integrations/>, 'Admin Panel':<AdminPanel currentAdmin={currentAdmin} setCurrentAdmin={setCurrentAdmin}/>,Settings:<SettingsPage light={light} setLight={setLight}/>};return pages[title] || null}
+function WorkspacePage({title,light,setLight,currentAdmin,setCurrentAdmin,refreshKey=0}:{title:string;light:boolean;setLight:(value:boolean)=>void;currentAdmin:AdminInfo|null;setCurrentAdmin:(a:AdminInfo|null)=>void;refreshKey?:number}){
+  // Pages that read alert-derived data only once on load are re-created whenever the alert list changes (see the 2 s poll in Page), so they update by themselves during a live demo. Pages with forms are left alone so typing is never interrupted.
+  const live=(node:React.ReactNode)=><Fragment key={refreshKey}>{node}</Fragment>
+  const pages:Record<string,React.ReactNode>={Incidents:live(<Incidents/>),Ransomware:<RansomwarePage/>,Investigations:<Investigations/>,Playbooks:live(<Playbooks/>),Runbook:<Runbook/>, 'Threat Intelligence':live(<ThreatIntel/>), 'Global Threat Map':live(<ThreatMap/>),'IP Blocklist':<IpBlocklist/>,Assets:<Assets/>, 'Response Center':live(<ResponseCenter/>), 'SSH / Sessions':<SshSessions/>,Audit:live(<Audit/>),Reports:<Reports/>, '24-Hour Report':<DailyReport/>, 'Detection Rules':live(<DetectionRules/>),Integrations:<Integrations/>, 'Admin Panel':<AdminPanel currentAdmin={currentAdmin} setCurrentAdmin={setCurrentAdmin}/>,Settings:<SettingsPage light={light} setLight={setLight}/>};return pages[title] || null}
 
 export default function Page() { const [collapsed,setCollapsed]=useState(false); const [active,setActive]=useState('Overview'); const [selected,setSelected]=useState<Alert|null>(null); const [search,setSearch]=useState(''); const [light,setLight]=useState(false); const [scrolling,setScrolling]=useState(false); const [refreshKey,setRefreshKey]=useState(0); const [actionBusy,setActionBusy]=useState(false); const [actionError,setActionError]=useState<string|null>(null); const [alertCount,setAlertCount]=useState<number|null>(null); const [incidentCount,setIncidentCount]=useState<number|null>(null); const [pendingCount,setPendingCount]=useState<number|null>(null);
   // Signed-in admin (Admin Panel tab). Starts null on first render (same
@@ -1340,6 +1641,24 @@ export default function Page() { const [collapsed,setCollapsed]=useState(false);
     api.getIncidents().then(d=>{ if(!cancelled) setIncidentCount(d.length) }).catch(()=>{ if(!cancelled) setIncidentCount(null) })
     return ()=>{ cancelled=true }
   },[refreshKey])
+  // Live refresh: poll the alert list every 2 s and bump refreshKey only when it
+  // actually changed (count, newest id or pending count), so new alerts show up
+  // without a manual reload and idle pages are not re-rendered for nothing.
+  const lastAlertSig=useRef<string|null>(null)
+  useEffect(()=>{
+    let cancelled=false
+    const poll=()=>api.getAlerts().then(d=>{
+      if(cancelled) return
+      const maxId=d.reduce((m,a)=>Math.max(m,a.id),0)
+      const pending=d.filter(a=>(a.response_status||'pending_approval')==='pending_approval').length
+      const sig=`${d.length}:${maxId}:${pending}`
+      if(lastAlertSig.current!==null && lastAlertSig.current!==sig) setRefreshKey(k=>k+1)
+      lastAlertSig.current=sig
+    }).catch(()=>{ /* backend briefly unreachable: change nothing */ })
+    poll()
+    const t=setInterval(poll,2000)
+    return ()=>{ cancelled=true; clearInterval(t) }
+  },[])
   // Load saved Settings preferences once on mount. Both default to a fixed
   // value on first render (Overview / local time) so server-rendered and
   // client-hydrated markup match -- reading localStorage here, after
@@ -1375,7 +1694,7 @@ export default function Page() { const [collapsed,setCollapsed]=useState(false);
     catch(err){ setActionError(err instanceof Error ? err.message : 'Failed to reject this response.') }
     finally{ setActionBusy(false) }
   }
-  const renderPage = active==='Overview' ? <Overview onSelect={setSelected} refreshKey={refreshKey} onNavigate={setActive} bumpRefresh={()=>setRefreshKey(k=>k+1)}/> : active==='Alerts' ? <DataTable onSelect={setSelected} refreshKey={refreshKey}/> : <WorkspacePage title={active} light={light} setLight={setLight} currentAdmin={currentAdmin} setCurrentAdmin={setCurrentAdmin}/>; return <div className={`soc-app ${light?'light':''}`}><aside className={`sidebar ${collapsed?'collapsed':''}`}><div className="brand"><Shield size={18}/><span>SOAR PLATFORM</span></div><button className="collapse-btn" onClick={()=>setCollapsed(!collapsed)}>{collapsed?<ChevronRight size={15}/>:<ChevronLeft size={15}/>}</button><div className="nav-groups">{['COMMAND','MONITOR','AUTOMATE','INTELLIGENCE','OPERATIONS','SYSTEM'].map(group=><div className="nav-group" key={group}><span className="group-label">{group}</span>{nav.filter(n=>n[0]===group).map(([,label,Icon])=><button className={`nav-item ${active===label?'active':''}`} onClick={()=>setActive(label as string)} key={label} title={collapsed?label:undefined}><Icon size={16}/><span>{label}</span>{label==='Alerts'&&!!alertCount&&<b className="nav-badge">{alertCount}</b>}{label==='Incidents'&&!!incidentCount&&<b className="nav-badge red">{incidentCount}</b>}</button>)}</div>)}</div><div className="sidebar-foot"><div className="user-avatar"><UserRound size={15}/></div><span>{currentAdmin?.name || 'SOC'}</span><MoreIcon/></div></aside><main className="main"><header className="topbar"><div className="global-search"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search IP, domain, hash, alert or incident..."/><kbd><Command size={11}/>K</kbd></div><div className="top-actions"><span className="live"><i/> LIVE</span><button className="top-icon"><Bell size={17}/>{!!pendingCount&&<b>{pendingCount}</b>}</button><button className="top-icon"><Activity size={17}/></button><button className="avatar">SOC</button></div></header><div className={`content ${scrolling?'is-scrolling':''}`} key={active} onScroll={handleScroll}>{renderPage}</div></main>{selected&&<Drawer alert={selected} close={()=>{setSelected(null); setActionError(null)}} onApprove={handleApprove} onReject={handleReject} busy={actionBusy} error={actionError}/>}</div> }
+  const renderPage = active==='Overview' ? <Overview onSelect={setSelected} refreshKey={refreshKey} onNavigate={setActive} bumpRefresh={()=>setRefreshKey(k=>k+1)}/> : active==='Alerts' ? <DataTable onSelect={setSelected} refreshKey={refreshKey}/> : <WorkspacePage title={active} light={light} setLight={setLight} currentAdmin={currentAdmin} setCurrentAdmin={setCurrentAdmin} refreshKey={refreshKey}/>; return <div className={`soc-app ${light?'light':''}`}><aside className={`sidebar ${collapsed?'collapsed':''}`}><div className="brand"><Shield size={18}/><span>SOAR PLATFORM</span></div><button className="collapse-btn" onClick={()=>setCollapsed(!collapsed)}>{collapsed?<ChevronRight size={15}/>:<ChevronLeft size={15}/>}</button><div className="nav-groups">{['COMMAND','MONITOR','AUTOMATE','INTELLIGENCE','OPERATIONS','SYSTEM'].map(group=><div className="nav-group" key={group}><span className="group-label">{group}</span>{nav.filter(n=>n[0]===group).map(([,label,Icon])=><button className={`nav-item ${active===label?'active':''}`} onClick={()=>setActive(label as string)} key={label} title={collapsed?label:undefined}><Icon size={16}/><span>{label}</span>{label==='Alerts'&&!!alertCount&&<b className="nav-badge">{alertCount}</b>}{label==='Incidents'&&!!incidentCount&&<b className="nav-badge red">{incidentCount}</b>}</button>)}</div>)}</div><div className="sidebar-foot"><div className="user-avatar"><UserRound size={15}/></div><span>{currentAdmin?.name || 'SOC'}</span><MoreIcon/></div></aside><main className="main"><header className="topbar"><div className="global-search"><Search size={16}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search IP, domain, hash, alert or incident..."/><kbd><Command size={11}/>K</kbd></div><div className="top-actions"><span className="live"><i/> LIVE</span><button className="top-icon"><Bell size={17}/>{!!pendingCount&&<b>{pendingCount}</b>}</button><button className="top-icon"><Activity size={17}/></button><button className="avatar">SOC</button></div></header>{active!=='Ransomware'&&<RansomwareBanner onOpen={()=>setActive('Ransomware')}/>}<div className={`content ${scrolling?'is-scrolling':''}`} key={active} onScroll={handleScroll}>{renderPage}</div></main>{selected&&<Drawer alert={selected} close={()=>{setSelected(null); setActionError(null)}} onApprove={handleApprove} onReject={handleReject} busy={actionBusy} error={actionError}/>}</div> }
 function MoreIcon(){return <span className="more-icon">•••</span>}
 
 // API wiring. Every one of these hits a real backend/main.py endpoint.

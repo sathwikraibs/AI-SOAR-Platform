@@ -1,0 +1,16 @@
+# Domains the endpoint agent treats as malicious (one per line, # comments allowed).
+# Looking one up raises a "Malicious website visited" alert for that device.
+#
+# These are SAFE TEST domains, published by security vendors for exactly this
+# purpose, so the feature can be demonstrated without touching anything harmful:
+#   testsafebrowsing.appspot.com   Google's Safe Browsing test pages
+#   wicar.org                      WICAR browser/AV test site (serves the EICAR test file)
+#   eicar.org                      EICAR anti-malware test file
+#   malware-demo.test              reserved .test name used by the built-in simulator
+#
+# For a larger real list, run:  python endpoint-agent/update_malicious_domains.py
+# (it writes malicious_domains_feed.txt, which is read as well).
+testsafebrowsing.appspot.com
+wicar.org
+eicar.org
+malware-demo.test

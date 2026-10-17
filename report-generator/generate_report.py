@@ -337,6 +337,118 @@ def _table_style(zebra: bool = True) -> TableStyle:
     return TableStyle(cmds)
 
 
+# ---------------------------------------------------------------------------
+# New-activity sections: endpoint (internal) devices, VPN / Tor / proxy
+# connections, ransomware incidents and office-policy findings. Built from
+# the same alerts plus two read-only backend lookups (/vpn-activity for the
+# exit country, /agents for the device list). Every lookup is optional: if
+# the backend does not answer, the section simply uses what the alerts hold.
+# ---------------------------------------------------------------------------
+_BASE_URL = API_URL.rsplit("/alerts", 1)[0]
+_VPN_KEYS = {"anonymizer_ip_block", "anonymizer_ip_detected"}
+_RANSOM_KEYS = {"ransomware_activity", "sysmon_ransomware"}
+_POLICY_KEYS = {"sysmon_policy_violation", "sysmon_malicious_website"}
+
+
+def _fetch_json(path: str):
+    try:
+        resp = requests.get(_BASE_URL + path, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _is_internal(a: dict) -> bool:
+    return bool(a.get("host")) or a.get("source") == "Sysmon"
+
+
+def _short_time(raw) -> str:
+    return str(raw or "")[:19].replace("T", " ")
+
+
+def _activity_sections(alerts: list[dict], sub_heading_style, heading_style, normal, table_cell) -> list:
+    internal = [a for a in alerts if _is_internal(a)]
+    external = [a for a in alerts if not _is_internal(a)]
+    vpn = [a for a in alerts if a.get("rule_key") in _VPN_KEYS]
+    blocked = [a for a in vpn if a.get("rule_key") == "anonymizer_ip_block"]
+    allowed = [a for a in vpn if a.get("rule_key") == "anonymizer_ip_detected"]
+    ransom = [a for a in alerts if a.get("rule_key") in _RANSOM_KEYS]
+    policy = [a for a in alerts if a.get("rule_key") in _POLICY_KEYS]
+    if not (internal or vpn or ransom):
+        return []
+
+    hosts = sorted({a.get("host") for a in internal if a.get("host")})
+    out: list = [Paragraph("Activity Breakdown", heading_style)]
+    summary = [["Category", "Alerts", "Detail"]]
+    summary.append(["Internal (devices / assets)", str(len(internal)), ", ".join(hosts[:6]) + (" ..." if len(hosts) > 6 else "") if hosts else "—"])
+    summary.append(["External (everything else)", str(len(external)), "Login attacks, uploads, network and host detections"])
+    summary.append(["VPN / Tor / proxy connections", str(len(vpn)), f"{len(blocked)} blocked, {len(allowed)} detected but allowed (auto-block off)"])
+    summary.append(["Ransomware incidents", str(len(ransom)), "File-encryption activity (MITRE T1486)" if ransom else "—"])
+    summary.append(["Office-policy findings", str(len(policy)), "Streaming / social limits, VPN clients, malicious websites" if policy else "—"])
+    rows = [[Paragraph(str(c), table_cell) for c in r] for r in summary[1:]]
+    t = Table([summary[0]] + rows, hAlign="LEFT", colWidths=[2.0 * inch, 0.6 * inch, 4.4 * inch])
+    t.setStyle(_table_style())
+    out += [t, Spacer(1, 0.12 * inch)]
+
+    if vpn:
+        geo = _fetch_json("/vpn-activity?limit=300") or {}
+        by_id = {r.get("alert_id"): r for r in geo.get("rows", [])}
+        out.append(Paragraph("VPN / Tor / Proxy Connections", sub_heading_style))
+        vrows = [["Time", "IP address", "Provider", "Country (exit)", "Action"]]
+        for a in sorted(vpn, key=lambda x: x.get("id", 0), reverse=True)[:25]:
+            g = by_id.get(a.get("id"), {})
+            vrows.append([
+                Paragraph(_short_time(a.get("timestamp")), table_cell),
+                Paragraph(str(a.get("ip") or "—"), table_cell),
+                Paragraph(str(g.get("provider") or "—"), table_cell),
+                Paragraph(str(g.get("country") or "Unknown"), table_cell),
+                Paragraph("Blocked" if a.get("rule_key") == "anonymizer_ip_block" else "Detected (allowed)", table_cell),
+            ])
+        vt = Table(vrows, hAlign="LEFT", repeatRows=1, colWidths=[1.45 * inch, 1.2 * inch, 1.5 * inch, 1.4 * inch, 1.45 * inch])
+        vt.setStyle(_table_style())
+        out += [vt, Spacer(1, 0.12 * inch)]
+
+    if ransom:
+        out.append(Paragraph("Ransomware Incidents", sub_heading_style))
+        rrows = [["Time", "Source", "Severity", "Risk", "Response"]]
+        for a in sorted(ransom, key=lambda x: x.get("id", 0), reverse=True)[:15]:
+            sev = a.get("severity") or "Unknown"
+            rrows.append([
+                Paragraph(_short_time(a.get("timestamp")), table_cell),
+                Paragraph(str(a.get("host") or a.get("source") or "—"), table_cell),
+                Paragraph(f'<font color="{_severity_hex(sev)}"><b>{sev}</b></font>', table_cell),
+                Paragraph(str(a.get("risk_score") if a.get("risk_score") is not None else "N/A"), table_cell),
+                Paragraph(str(a.get("response_action") or "—")[:40], table_cell),
+            ])
+        rt = Table(rrows, hAlign="LEFT", repeatRows=1, colWidths=[1.45 * inch, 1.6 * inch, 0.9 * inch, 0.6 * inch, 2.45 * inch])
+        rt.setStyle(_table_style())
+        out += [rt, Spacer(1, 0.12 * inch)]
+
+    if internal:
+        agents = _fetch_json("/agents") or []
+        wanted = [g for g in agents if g.get("hostname") in hosts] or agents
+        if wanted:
+            out.append(Paragraph("Monitored Devices (current state)", sub_heading_style))
+            drows = [["Device", "Owner", "Monitoring", "Alerts", "Usage today"]]
+            for g in wanted[:15]:
+                cats = ((g.get("usage") or {}).get("categories") or {}).values()
+                usage = ", ".join(f"{c.get('label')} {c.get('minutes')}/{c.get('limit')} min" for c in cats if c.get("limit")) or "—"
+                active = g.get("monitoring_active")
+                drows.append([
+                    Paragraph(str(g.get("hostname")), table_cell),
+                    Paragraph(str(g.get("owner") or "—"), table_cell),
+                    Paragraph("On" if active else "Paused", table_cell),
+                    Paragraph(str(g.get("alert_count", 0)), table_cell),
+                    Paragraph(usage, table_cell),
+                ])
+            dt = Table(drows, hAlign="LEFT", repeatRows=1, colWidths=[1.3 * inch, 1.2 * inch, 0.85 * inch, 0.6 * inch, 3.05 * inch])
+            dt.setStyle(_table_style())
+            out += [dt, Spacer(1, 0.12 * inch)]
+    return out
+
+
+
 def build_pdf(new_alerts: list[dict], filepath: str, title: str = "AI-SOAR Incident Report", subtitle: str | None = None, empty_message: str = "No new alerts this cycle.") -> None:
     """
     title/subtitle/empty_message let generate_daily_report.py reuse this
@@ -396,6 +508,9 @@ def build_pdf(new_alerts: list[dict], filepath: str, title: str = "AI-SOAR Incid
         story.append(Paragraph("Response Status", sub_heading_style))
         story.append(_legend_row(status_pairs, normal))
         story.append(Spacer(1, 0.15 * inch))
+
+        # --- new activity: devices, VPN/Tor, ransomware, policy ---
+        story.extend(_activity_sections(new_alerts, sub_heading_style, heading_style, normal, table_cell))
 
         # --- compact detail table ---
         story.append(Paragraph("Alert Detail Table", heading_style))

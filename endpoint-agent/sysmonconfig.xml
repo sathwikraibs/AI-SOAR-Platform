@@ -1,0 +1,68 @@
+<!--
+  Sysmon configuration for the AI-SOAR endpoint agent (lab/demo use).
+
+  Install:   sysmon64 -accepteula -i sysmonconfig.xml     (Administrator prompt)
+  Update:    sysmon64 -c sysmonconfig.xml
+
+  NOTE: written for Sysmon schema 4.90; it has NOT been validated against a
+  live Sysmon install in the project's test environment. If Sysmon rejects it,
+  run `sysmon64 -s` to print the schema your version expects and adjust.
+-->
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>sha256</HashAlgorithms>
+  <EventFiltering>
+
+    <!-- 1: log every process creation -->
+    <RuleGroup name="process" groupRelation="or">
+      <ProcessCreate onmatch="exclude" />
+    </RuleGroup>
+
+    <!-- 3: network connections, except loopback -->
+    <RuleGroup name="network" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <DestinationIp condition="is">127.0.0.1</DestinationIp>
+        <DestinationIp condition="is">::1</DestinationIp>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- 22: DNS lookups (which website / domain, from which program) - the activity policy uses these -->
+    <RuleGroup name="dns" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.local</QueryName>
+        <QueryName condition="end with">.arpa</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+    <!-- 10: access to LSASS (credential dumping) -->
+    <RuleGroup name="lsass" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="end with">lsass.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- 11: files in Startup folders, ransomware-style extensions, scripts -->
+    <RuleGroup name="files" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+        <TargetFilename condition="end with">.locked</TargetFilename>
+        <TargetFilename condition="end with">.encrypted</TargetFilename>
+        <TargetFilename condition="end with">.crypt</TargetFilename>
+        <TargetFilename condition="end with">.enc</TargetFilename>
+        <TargetFilename condition="end with">.wncry</TargetFilename>
+        <TargetFilename condition="end with">.ps1</TargetFilename>
+        <TargetFilename condition="end with">.vbs</TargetFilename>
+        <TargetFilename condition="end with">.bat</TargetFilename>
+        <TargetFilename condition="contains">DECRYPT</TargetFilename>
+        <TargetFilename condition="contains">RANSOM</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- 12/13/14: registry autoruns -->
+    <RuleGroup name="registry" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>

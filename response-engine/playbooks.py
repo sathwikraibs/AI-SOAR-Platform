@@ -75,6 +75,32 @@ PLAYBOOKS = {
             {"action": "Notify SOC analyst", "auto": True},
         ],
     },
+    "anonymizer_detected": {
+        "name": "Anonymizer Network Detected (not blocked)",
+        "steps": [
+            {"action": "Log the VPN / Tor / proxy access with the exit-node location", "auto": True},
+            {"action": "Notify SOC analyst", "auto": True},
+            {"action": "Block source IP -- awaiting approval (automatic VPN/Tor blocking is switched off)", "auto": False},
+        ],
+    },
+    "policy_violation": {
+        "name": "Acceptable-Use Policy Violation",
+        "steps": [
+            {"action": "Log the activity against the acceptable-use policy", "auto": True},
+            {"action": "Notify the employee's manager", "auto": True},
+            {"action": "Send the employee a policy reminder -- awaiting approval", "auto": False},
+            {"action": "Review the device's recent activity -- awaiting approval", "auto": False},
+        ],
+    },
+    "endpoint_malicious_site": {
+        "name": "Malicious Website Visited (endpoint)",
+        "steps": [
+            {"action": "Log the visit and notify SOC analyst", "auto": True},
+            {"action": "Block the domain at DNS / web filter -- awaiting approval", "auto": False},
+            {"action": "Isolate the device pending review -- awaiting approval", "auto": False},
+            {"action": "Run a malware scan on the device -- awaiting approval", "auto": False},
+        ],
+    },
     "standard_triage": {
         "name": "Standard Analyst Triage",
         "steps": [

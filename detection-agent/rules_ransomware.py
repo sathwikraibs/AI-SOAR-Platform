@@ -175,15 +175,36 @@ def prime_ransomware_state() -> None:
 
 
 def check_ransomware() -> list[dict]:
-    global _snapshot, _incident_active
+    """Local version: scans the watched folder on this machine and evaluates what changed since the last scan."""
+    global _snapshot
     if not _primed:
         prime_ransomware_state()
         return []
 
-    now = time.time()
     current = _scan()
     previous = _snapshot
     _snapshot = current
+    return evaluate_changes(
+        current,
+        previous,
+        is_note=_looks_like_ransom_note,
+        rel=lambda path: os.path.relpath(path, WATCH_DIR),
+        last_ip=_last_active_ip,
+    )
+
+
+def evaluate_changes(current: dict, previous: dict, is_note, rel, last_ip) -> list[dict]:
+    """
+    The detection itself, shared by the local folder scan above and the remote
+    snapshot poll in rules_ransomware_http.py (for a target app hosted elsewhere).
+
+    current / previous: path -> (mtime, size, entropy or None)
+    is_note(path) -> bool       does this file look like a ransom note?
+    rel(path) -> str            the file's name relative to the watched folder
+    last_ip() -> str | None     who was last active against the app, if known
+    """
+    global _incident_active
+    now = time.time()
 
     encrypted_now: list[str] = []
     notes_now: list[str] = []
@@ -195,7 +216,7 @@ def check_ransomware() -> list[dict]:
         has_ransom_ext = ext in RANSOM_EXTENSIONS
         if has_ransom_ext:
             ransom_artifacts_present = True
-        if _looks_like_ransom_note(path):
+        if is_note(path):
             ransom_artifacts_present = True
             if is_new:
                 notes_now.append(path)
@@ -213,14 +234,14 @@ def check_ransomware() -> list[dict]:
         _recent_encrypted.clear()
 
     for path in encrypted_now:
-        _recent_encrypted.append((now, _canon(os.path.relpath(path, WATCH_DIR))))
+        _recent_encrypted.append((now, _canon(rel(path))))
     while _recent_encrypted and now - _recent_encrypted[0][0] > WINDOW_SECONDS:
         _recent_encrypted.popleft()
 
     if _incident_active or not is_enabled(RULE_KEY_RANSOMWARE):
         return []
 
-    note_present = bool(notes_now) or any(_looks_like_ransom_note(p) for p in current)
+    note_present = bool(notes_now) or any(is_note(p) for p in current)
     count = len({name for _, name in _recent_encrypted})
     if not ((note_present and count >= 1) or count >= MIN_ENCRYPTED_FILES):
         return []
@@ -228,7 +249,7 @@ def check_ransomware() -> list[dict]:
     _incident_active = True
     names = sorted({name for _, name in _recent_encrypted})
     sample = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
-    note_names = sorted(os.path.basename(p) for p in current if _looks_like_ransom_note(p))
+    note_names = sorted(os.path.basename(p) for p in current if is_note(p))
     note_text = f", ransom note '{note_names[0]}' dropped in the folder" if note_names else ""
     return [
         {
@@ -239,7 +260,7 @@ def check_ransomware() -> list[dict]:
                 f"({sample}){note_text}, mass file rename observed"
                 + (" -- attacker demanding payment to restore the files" if note_names else "")
             ),
-            "ip": _last_active_ip(),
+            "ip": last_ip(),
             "hash": None,
             "rule_key": RULE_KEY_RANSOMWARE,
         }
