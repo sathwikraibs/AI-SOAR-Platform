@@ -200,4 +200,4 @@ Without the API keys, reputation lookups fall back to a deterministic local resu
 |  |  |
 |  |  |
 
-**Project guide:** _your supervisor's name_
+**Project guide:** 
