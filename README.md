@@ -197,6 +197,10 @@ Without the API keys, reputation lookups fall back to a deterministic local resu
 | Roll number | Name |
 |---|---|
 | 20231CCS0148 | Sathwik Rai B S |
+| 20231CCS0136 | Nanda Kumar M G |
+| 20231CCS0133 | Mula Jagadishwara Reddy |
+| 20231CCS0138 | Tejas Kumar R|
+
 |  |  |
 |  |  |
 
