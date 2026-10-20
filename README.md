@@ -201,7 +201,6 @@ Without the API keys, reputation lookups fall back to a deterministic local resu
 | 20231CCS0133 | Mula Jagadishwara Reddy |
 | 20231CCS0138 | Tejas Kumar R|
 
-|  |  |
-|  |  |
+
 
 **Project guide:** 
